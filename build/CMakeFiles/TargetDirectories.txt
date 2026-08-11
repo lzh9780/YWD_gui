@@ -1,4 +1,0 @@
-/home/tp/YWD_gui/build/CMakeFiles/YWD_Motor_Control.dir
-/home/tp/YWD_gui/build/CMakeFiles/edit_cache.dir
-/home/tp/YWD_gui/build/CMakeFiles/rebuild_cache.dir
-/home/tp/YWD_gui/build/CMakeFiles/YWD_Motor_Control_autogen.dir
