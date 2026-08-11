@@ -1,0 +1,1028 @@
+#include "mainwindow.h"
+
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QGridLayout>
+#include <QFormLayout>
+#include <QMessageBox>
+#include <QDateTime>
+#include <QStatusBar>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
+#include <QHeaderView>
+#include <QScrollBar>
+#include <cstring>
+#include <cmath>
+
+// ============================================================================
+// Helpers
+// ============================================================================
+QString MainWindow::hexStr(uint32_t val, int digits)
+{
+    return QString("%1").arg(val, digits, 16, QChar('0')).toUpper();
+}
+
+QDoubleSpinBox *MainWindow::makeDblSpin(double min, double max, int decimals, double val)
+{
+    auto *sp = new QDoubleSpinBox();
+    sp->setRange(min, max);
+    sp->setDecimals(decimals);
+    sp->setValue(val);
+    sp->setFixedWidth(78);
+    sp->setAlignment(Qt::AlignRight);
+    return sp;
+}
+
+QWidget *MainWindow::makeSpinRow(const QString &label,
+                                  QDoubleSpinBox *s0, QDoubleSpinBox *s1, QDoubleSpinBox *s2)
+{
+    auto *w = new QWidget();
+    auto *h = new QHBoxLayout(w);
+    h->setContentsMargins(0, 0, 0, 0);
+    h->setSpacing(3);
+    auto *lbl = new QLabel(label);
+    lbl->setFixedWidth(90);
+    lbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    h->addWidget(lbl);
+    h->addWidget(s0);
+    h->addWidget(s1);
+    h->addWidget(s2);
+    h->addStretch();
+    return w;
+}
+
+// ============================================================================
+// Constructor / destructor
+// ============================================================================
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , m_device(new CanFdDevice(this))
+    , m_connected(false)
+    , m_pollTimer(new QTimer(this))
+    , m_fbValid(false)
+    , m_diagramTimer_(new QTimer(this))
+    , m_mitTimer(new QTimer(this))
+    , m_pvTimer(new QTimer(this))
+    , m_cvTimer(new QTimer(this))
+    , m_regBatchIdx(0)
+    , m_batchReadTimer(new QTimer(this))
+{
+    setWindowTitle("YWD Smart Motor CAN-FD Control");
+    resize(1280, 850);
+
+    setupUi();
+
+    // Status bar: RX statistics
+    m_lblRxStats = new QLabel("RX: 0  |  Feedback: 0.0 Hz", this);
+    m_lblRxStats->setStyleSheet("color: #888; font-family: monospace;");
+    statusBar()->addPermanentWidget(m_lblRxStats);
+
+    // Device callbacks
+    connect(m_device, &CanFdDevice::frameReceived,
+            this,     &MainWindow::onFrameReceived);
+
+    // Poll timer (50 ms) for stats refresh
+    connect(m_pollTimer, &QTimer::timeout, this, &MainWindow::onPollTimer);
+    m_pollTimer->start(50);
+
+    // Per-tab periodic send timers
+    connect(m_mitTimer, &QTimer::timeout, this, &MainWindow::onMitTick);
+    connect(m_pvTimer,  &QTimer::timeout, this, &MainWindow::onPvTick);
+    connect(m_cvTimer,  &QTimer::timeout, this, &MainWindow::onCvTick);
+
+    // Clear per-motor register value cache
+    memset(m_regValues, 0, sizeof(m_regValues));
+    memset(m_regValid,  0, sizeof(m_regValid));
+    memset(m_regRstat,  0, sizeof(m_regRstat));
+
+    // Batch register read timer
+    connect(m_batchReadTimer, &QTimer::timeout, this, &MainWindow::onBatchReadNext);
+
+    // Load full register catalogue
+    m_allRegs = YwdProtocol::getAllRegisters();
+
+    // Populate each motor page's register table — 4 cols: Addr|Name|Value|RSTAT
+    for (int mi = 0; mi < 3; ++mi) {
+        m_regTables[mi]->setRowCount(m_allRegs.size());
+        for (int i = 0; i < m_allRegs.size(); ++i) {
+            const RegInfo &r = m_allRegs[i];
+            m_regTables[mi]->setItem(i, 0, new QTableWidgetItem(QString("0x%1").arg(r.addr, 2, 16, QChar('0'))));
+            m_regTables[mi]->setItem(i, 1, new QTableWidgetItem(r.name));
+            m_regTables[mi]->setItem(i, 2, new QTableWidgetItem("—"));
+            m_regTables[mi]->setItem(i, 3, new QTableWidgetItem("—"));
+        }
+        m_regTables[mi]->resizeColumnsToContents();
+    }
+}
+
+// ============================================================================
+// UI construction
+// ============================================================================
+void MainWindow::setupUi()
+{
+    QWidget *central = new QWidget(this);
+    setCentralWidget(central);
+
+    QVBoxLayout *mainLayout = new QVBoxLayout(central);
+    mainLayout->setContentsMargins(4, 4, 4, 4);
+    mainLayout->setSpacing(4);
+
+    // ---- Row 0: Device connection (compact) ----
+    QHBoxLayout *devRow = new QHBoxLayout();
+    devRow->addWidget(new QLabel("Device:"));
+    m_cmbDevice = new QComboBox();
+    m_cmbDevice->setMinimumWidth(150);
+    m_cmbDevice->addItem("ZCAN1");
+    devRow->addWidget(m_cmbDevice, 1);
+    m_lblDevStatus = new QLabel("Disconnected");
+    m_lblDevStatus->setStyleSheet("color: #888;");
+    devRow->addWidget(m_lblDevStatus);
+    m_btnConnect = new QPushButton("Connect");
+    m_btnConnect->setFixedWidth(90);
+    connect(m_btnConnect, &QPushButton::clicked, this, &MainWindow::onDeviceToggle);
+    devRow->addWidget(m_btnConnect);
+    mainLayout->addLayout(devRow);
+
+    // ---- Row 1: Two-column splitter (left controls | right diagrams) ----
+    QSplitter *hSplit = new QSplitter(Qt::Horizontal);
+
+    // ============ LEFT PANEL ============
+    QWidget   *leftPanel = new QWidget();
+    QVBoxLayout *leftV = new QVBoxLayout(leftPanel);
+    leftV->setContentsMargins(0, 0, 0, 0);
+    leftV->setSpacing(3);
+
+    // -- Command tabs --
+    m_cmdTabs = new QTabWidget();
+    m_cmdTabs->setTabPosition(QTabWidget::North);
+    m_cmdTabs->setDocumentMode(true);
+
+    buildMitTab();
+    buildPosVelTab();
+    buildConstVelTab();
+    buildSystemTab();
+
+    leftV->addWidget(m_cmdTabs);
+
+    // -- Multi-motor feedback table --
+    {
+        QGroupBox *grp = new QGroupBox("Motor Feedback");
+        QVBoxLayout *vl = new QVBoxLayout(grp);
+        vl->setContentsMargins(2, 2, 2, 2);
+        m_feedbackTable = new QTableWidget(0, 10);
+        m_feedbackTable->setHorizontalHeaderLabels(
+            {"Motor", "State", "Mode", "Position", "Velocity", "Torque",
+             "Voltage", "MOS T", "Mot T", "SEQ"});
+        m_feedbackTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_feedbackTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_feedbackTable->verticalHeader()->setVisible(false);
+        m_feedbackTable->setMaximumHeight(120);
+        m_feedbackTable->horizontalHeader()->setStretchLastSection(true);
+        vl->addWidget(m_feedbackTable);
+        leftV->addWidget(grp);
+    }
+
+    // -- Register access --
+    {
+        QGroupBox *grp = new QGroupBox("Register Access");
+        QVBoxLayout *vl = new QVBoxLayout(grp);
+        vl->setContentsMargins(4, 2, 4, 2);
+        vl->setSpacing(2);
+
+        // Row 1: Single register read/write controls
+        QHBoxLayout *row1 = new QHBoxLayout();
+        row1->addWidget(new QLabel("Motor:"));
+        m_regMotorId = new QSpinBox();
+        m_regMotorId->setRange(0, 0x7F);
+        m_regMotorId->setPrefix("0x");
+        m_regMotorId->setDisplayIntegerBase(16);
+        m_regMotorId->setValue(0x01);
+        m_regMotorId->setFixedWidth(70);
+        row1->addWidget(m_regMotorId);
+        row1->addWidget(new QLabel("Addr:"));
+        m_spinRegAddr = new QSpinBox();
+        m_spinRegAddr->setRange(0, 0xFF);
+        m_spinRegAddr->setPrefix("0x");
+        m_spinRegAddr->setDisplayIntegerBase(16);
+        m_spinRegAddr->setValue(0x11);
+        m_spinRegAddr->setFixedWidth(80);
+        row1->addWidget(m_spinRegAddr);
+        row1->addStretch();
+        vl->addLayout(row1);
+
+        QHBoxLayout *row2 = new QHBoxLayout();
+        row2->addWidget(new QLabel("Value:"));
+        m_editRegValue = new QLineEdit("0x00000000");
+        m_editRegValue->setFont(QFont("monospace", 10));
+        m_editRegValue->setMaxLength(10);
+        m_editRegValue->setMinimumWidth(100);
+        m_editRegValue->setValidator(new QRegularExpressionValidator(
+            QRegularExpression("0[xX][0-9a-fA-F]{0,8}"), m_editRegValue));
+        m_editRegValue->setToolTip("32-bit hex value, e.g. 0x42B40000");
+        connect(m_editRegValue, &QLineEdit::returnPressed, this, &MainWindow::onRegWrite);
+        row2->addWidget(m_editRegValue, 1);
+        m_btnRegRead  = new QPushButton("Read");
+        m_btnRegWrite = new QPushButton("Write");
+        connect(m_btnRegRead,  &QPushButton::clicked, this, &MainWindow::onRegRead);
+        connect(m_btnRegWrite, &QPushButton::clicked, this, &MainWindow::onRegWrite);
+        row2->addWidget(m_btnRegRead);
+        row2->addWidget(m_btnRegWrite);
+        vl->addLayout(row2);
+
+        // Row 3: Read result label
+        QHBoxLayout *row3 = new QHBoxLayout();
+        m_lblRegResult = new QLabel("");
+        m_lblRegResult->setStyleSheet("color: green; font-family: monospace;");
+        row3->addWidget(m_lblRegResult, 1);
+        vl->addLayout(row3);
+
+        // Motor pages: each motor has its own table + Read All button
+        m_regMotorTabs = new QTabWidget();
+        m_regMotorTabs->setDocumentMode(true);
+        for (int mi = 0; mi < 3; ++mi) {
+            QWidget *page = new QWidget();
+            QVBoxLayout *pl = new QVBoxLayout(page);
+            pl->setContentsMargins(2, 2, 2, 2);
+            pl->setSpacing(2);
+
+            // Table: Addr | Name | Value | RSTAT
+            m_regTables[mi] = new QTableWidget(0, 4);
+            m_regTables[mi]->setHorizontalHeaderLabels({"Addr", "Name", "Value", "RSTAT"});
+            m_regTables[mi]->setSelectionBehavior(QAbstractItemView::SelectRows);
+            m_regTables[mi]->setEditTriggers(QAbstractItemView::NoEditTriggers);
+            m_regTables[mi]->verticalHeader()->setVisible(false);
+            m_regTables[mi]->setMaximumHeight(130);
+            m_regTables[mi]->horizontalHeader()->setStretchLastSection(true);
+            pl->addWidget(m_regTables[mi]);
+
+            // Bottom row: Read All button + status
+            QHBoxLayout *br = new QHBoxLayout();
+            m_btnReadAllMotor[mi] = new QPushButton("Read All");
+            m_btnReadAllMotor[mi]->setFixedWidth(80);
+            uint8_t mid = static_cast<uint8_t>(0x01 + mi);
+            connect(m_btnReadAllMotor[mi], &QPushButton::clicked, this, [this, mid]{ onReadAllRegs(mid); });
+            br->addWidget(m_btnReadAllMotor[mi]);
+            m_lblReadAllMotor[mi] = new QLabel("");
+            m_lblReadAllMotor[mi]->setStyleSheet("color: #aaa; font-family: monospace;");
+            br->addWidget(m_lblReadAllMotor[mi], 1);
+            pl->addLayout(br);
+
+            m_regMotorTabs->addTab(page, QString("Motor 0x0%1").arg(mi + 1));
+        }
+        vl->addWidget(m_regMotorTabs);
+
+        leftV->addWidget(grp);
+    }
+
+    leftV->addStretch();
+    hSplit->addWidget(leftPanel);
+
+    // ============ RIGHT PANEL: Diagrams ============
+    m_plotPanel_ = new YwdPlotPanel();
+    m_plotPanel_->setUpdateTimer(m_diagramTimer_);
+    connect(m_diagramTimer_, &QTimer::timeout, m_plotPanel_, &YwdPlotPanel::onTimerTick);
+    hSplit->addWidget(m_plotPanel_);
+
+    hSplit->setStretchFactor(0, 0);
+    hSplit->setStretchFactor(1, 1);
+    hSplit->setSizes({380, 900});
+
+    mainLayout->addWidget(hSplit, 1);
+
+    // ---- Row 2: Log (bottom) ----
+    QGroupBox *logGrp = new QGroupBox("Communication Log");
+    QVBoxLayout *logLay = new QVBoxLayout(logGrp);
+    logLay->setContentsMargins(2, 2, 2, 2);
+
+    m_logView = new QTextEdit();
+    m_logView->setReadOnly(true);
+    m_logView->setMinimumHeight(60);
+    m_logView->setFont(QFont("monospace", 9));
+    m_logView->setStyleSheet("background: #1e1e1e; color: #d4d4d4;");
+    m_logView->document()->setMaximumBlockCount(2000);
+
+    QHBoxLayout *logBtnRow = new QHBoxLayout();
+    logBtnRow->addStretch();
+    QPushButton *btnClearLog = new QPushButton("Clear Log");
+    btnClearLog->setFixedWidth(80);
+    connect(btnClearLog, &QPushButton::clicked, m_logView, &QTextEdit::clear);
+    logBtnRow->addWidget(btnClearLog);
+
+    logLay->addWidget(m_logView);
+    logLay->addLayout(logBtnRow);
+    mainLayout->addWidget(logGrp);
+}
+
+// ============================================================================
+// Tab builders
+// ============================================================================
+void MainWindow::buildMitTab()
+{
+    QWidget *w = new QWidget();
+    QVBoxLayout *vl = new QVBoxLayout(w);
+    vl->setContentsMargins(4, 4, 4, 4);
+    vl->setSpacing(2);
+
+    // Motor enable checkboxes row
+    {
+        auto *row = new QHBoxLayout();
+        row->addWidget(new QLabel("Motor:"));
+        for (int i = 0; i < 3; ++i) {
+            m_mitEn[i] = new QCheckBox(QString("0x0%1").arg(i + 1));
+            m_mitEn[i]->setChecked(true);
+            row->addWidget(m_mitEn[i]);
+        }
+        row->addStretch();
+        vl->addLayout(row);
+    }
+
+    // Parameter rows — one per parameter, 3 spinboxes per row
+    for (int i = 0; i < 3; ++i) {
+        m_mitPos[i] = makeDblSpin(-999, 999, 4, 0);
+        m_mitVel[i] = makeDblSpin(-999, 999, 4, 0);
+        m_mitKp[i]  = makeDblSpin(0, 5000, 4, 0);
+        m_mitKd[i]  = makeDblSpin(0, 500,  4, 0);
+        m_mitTff[i] = makeDblSpin(-999, 999, 4, 0);
+    }
+    vl->addWidget(makeSpinRow("Pos (rad):",        m_mitPos[0], m_mitPos[1], m_mitPos[2]));
+    vl->addWidget(makeSpinRow("Vel (rad/s):",      m_mitVel[0], m_mitVel[1], m_mitVel[2]));
+    vl->addWidget(makeSpinRow("Kp (Nm/rad):",      m_mitKp[0],  m_mitKp[1],  m_mitKp[2]));
+    vl->addWidget(makeSpinRow("Kd (Nm/(rad/s)):",  m_mitKd[0],  m_mitKd[1],  m_mitKd[2]));
+    vl->addWidget(makeSpinRow("Tff (Nm):",         m_mitTff[0], m_mitTff[1], m_mitTff[2]));
+
+    // Interval + toggle button
+    {
+        auto *row = new QHBoxLayout();
+        row->addWidget(new QLabel("Interval:"));
+        m_spinMitInterval = new QSpinBox();
+        m_spinMitInterval->setRange(10, 5000);
+        m_spinMitInterval->setValue(100);
+        m_spinMitInterval->setSuffix(" ms");
+        m_spinMitInterval->setFixedWidth(90);
+        row->addWidget(m_spinMitInterval);
+        row->addStretch();
+        m_lblMitStatus = new QLabel("");
+        m_lblMitStatus->setStyleSheet("color: #888; font-size: 9px;");
+        row->addWidget(m_lblMitStatus);
+        m_btnMitToggle = new QPushButton("Start Sending");
+        m_btnMitToggle->setFixedWidth(110);
+        m_btnMitToggle->setStyleSheet(
+            "QPushButton { background: #2e7d32; color: white; font-weight: bold; }");
+        connect(m_btnMitToggle, &QPushButton::clicked, this, &MainWindow::onMitToggle);
+        row->addWidget(m_btnMitToggle);
+        vl->addLayout(row);
+    }
+
+    vl->addStretch();
+    m_cmdTabs->addTab(w, "MIT");
+}
+
+void MainWindow::buildPosVelTab()
+{
+    QWidget *w = new QWidget();
+    QVBoxLayout *vl = new QVBoxLayout(w);
+    vl->setContentsMargins(4, 4, 4, 4);
+    vl->setSpacing(2);
+
+    // Motor enable checkboxes
+    {
+        auto *row = new QHBoxLayout();
+        row->addWidget(new QLabel("Motor:"));
+        for (int i = 0; i < 3; ++i) {
+            m_pvEn[i] = new QCheckBox(QString("0x0%1").arg(i + 1));
+            m_pvEn[i]->setChecked(true);
+            row->addWidget(m_pvEn[i]);
+        }
+        row->addStretch();
+        vl->addLayout(row);
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        m_pvPos[i]    = makeDblSpin(-999, 999, 4, 0);
+        m_pvVelLim[i] = makeDblSpin(0, 999,    4, 0);
+    }
+    vl->addWidget(makeSpinRow("Pos (rad):",         m_pvPos[0],    m_pvPos[1],    m_pvPos[2]));
+    vl->addWidget(makeSpinRow("Vel limit (rad/s):", m_pvVelLim[0], m_pvVelLim[1], m_pvVelLim[2]));
+
+    // Interval + toggle
+    {
+        auto *row = new QHBoxLayout();
+        row->addWidget(new QLabel("Interval:"));
+        m_spinPvInterval = new QSpinBox();
+        m_spinPvInterval->setRange(10, 5000);
+        m_spinPvInterval->setValue(100);
+        m_spinPvInterval->setSuffix(" ms");
+        m_spinPvInterval->setFixedWidth(90);
+        row->addWidget(m_spinPvInterval);
+        row->addStretch();
+        m_lblPvStatus = new QLabel("");
+        m_lblPvStatus->setStyleSheet("color: #888; font-size: 9px;");
+        row->addWidget(m_lblPvStatus);
+        m_btnPvToggle = new QPushButton("Start Sending");
+        m_btnPvToggle->setFixedWidth(110);
+        m_btnPvToggle->setStyleSheet(
+            "QPushButton { background: #2e7d32; color: white; font-weight: bold; }");
+        connect(m_btnPvToggle, &QPushButton::clicked, this, &MainWindow::onPvToggle);
+        row->addWidget(m_btnPvToggle);
+        vl->addLayout(row);
+    }
+
+    vl->addStretch();
+    m_cmdTabs->addTab(w, "Pos-Vel");
+}
+
+void MainWindow::buildConstVelTab()
+{
+    QWidget *w = new QWidget();
+    QVBoxLayout *vl = new QVBoxLayout(w);
+    vl->setContentsMargins(4, 4, 4, 4);
+    vl->setSpacing(2);
+
+    // Motor enable checkboxes
+    {
+        auto *row = new QHBoxLayout();
+        row->addWidget(new QLabel("Motor:"));
+        for (int i = 0; i < 3; ++i) {
+            m_cvEn[i] = new QCheckBox(QString("0x0%1").arg(i + 1));
+            m_cvEn[i]->setChecked(true);
+            row->addWidget(m_cvEn[i]);
+        }
+        row->addStretch();
+        vl->addLayout(row);
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        m_cvVel[i] = makeDblSpin(-999, 999, 4, 0);
+    }
+    vl->addWidget(makeSpinRow("Vel (rad/s):", m_cvVel[0], m_cvVel[1], m_cvVel[2]));
+
+    // Interval + toggle
+    {
+        auto *row = new QHBoxLayout();
+        row->addWidget(new QLabel("Interval:"));
+        m_spinCvInterval = new QSpinBox();
+        m_spinCvInterval->setRange(10, 5000);
+        m_spinCvInterval->setValue(100);
+        m_spinCvInterval->setSuffix(" ms");
+        m_spinCvInterval->setFixedWidth(90);
+        row->addWidget(m_spinCvInterval);
+        row->addStretch();
+        m_lblCvStatus = new QLabel("");
+        m_lblCvStatus->setStyleSheet("color: #888; font-size: 9px;");
+        row->addWidget(m_lblCvStatus);
+        m_btnCvToggle = new QPushButton("Start Sending");
+        m_btnCvToggle->setFixedWidth(110);
+        m_btnCvToggle->setStyleSheet(
+            "QPushButton { background: #2e7d32; color: white; font-weight: bold; }");
+        connect(m_btnCvToggle, &QPushButton::clicked, this, &MainWindow::onCvToggle);
+        row->addWidget(m_btnCvToggle);
+        vl->addLayout(row);
+    }
+
+    vl->addStretch();
+    m_cmdTabs->addTab(w, "Const Vel");
+}
+
+void MainWindow::buildSystemTab()
+{
+    QWidget *w = new QWidget();
+    QVBoxLayout *vl = new QVBoxLayout(w);
+    vl->setContentsMargins(4, 4, 4, 4);
+    vl->setSpacing(3);
+
+    // Motor enable checkboxes
+    {
+        auto *row = new QHBoxLayout();
+        row->addWidget(new QLabel("Motor:"));
+        for (int i = 0; i < 3; ++i) {
+            m_sysEn[i] = new QCheckBox(QString("0x0%1").arg(i + 1));
+            m_sysEn[i]->setChecked(true);
+            row->addWidget(m_sysEn[i]);
+        }
+        row->addStretch();
+        vl->addLayout(row);
+    }
+
+    auto makeSysBtn = [&](const QString &text, int cmd) {
+        auto *b = new QPushButton(text);
+        connect(b, &QPushButton::clicked, this, [this, cmd]{ onSendSystemCmd(cmd); });
+        return b;
+    };
+
+    QGridLayout *grid = new QGridLayout();
+    m_btnSysEnable       = makeSysBtn("Enable",      SYS_CMD_ENABLE);
+    m_btnSysDisable      = makeSysBtn("Disable",     SYS_CMD_DISABLE);
+    m_btnSysSetZero      = makeSysBtn("Set Zero",    SYS_CMD_SET_ZERO);
+    m_btnSysClearFault   = makeSysBtn("Clear Fault", SYS_CMD_CLEAR_FAULT);
+    m_btnSysSave         = makeSysBtn("Save",        SYS_CMD_SAVE);
+    m_btnSysReset        = makeSysBtn("Reset",       SYS_CMD_RESET);
+    m_btnSysLoadDefaults = makeSysBtn("Load Default",SYS_CMD_LOAD_DEFAULTS);
+
+    grid->addWidget(m_btnSysEnable,       0, 0);
+    grid->addWidget(m_btnSysDisable,      0, 1);
+    grid->addWidget(m_btnSysSetZero,      1, 0);
+    grid->addWidget(m_btnSysClearFault,   1, 1);
+    grid->addWidget(m_btnSysSave,         2, 0);
+    grid->addWidget(m_btnSysReset,        2, 1);
+    grid->addWidget(m_btnSysLoadDefaults, 3, 0, 1, 2);
+    vl->addLayout(grid);
+    vl->addStretch();
+    m_cmdTabs->addTab(w, "System");
+}
+
+// ============================================================================
+// Logging
+// ============================================================================
+void MainWindow::logMessage(const QString &msg)
+{
+    QString ts = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    m_logView->append("[" + ts + "] " + msg);
+}
+
+void MainWindow::logRawTx(const CanFdFrame &frame, const QString &dir)
+{
+    QString hex;
+    for (int i = 0; i < frame.len; ++i)
+        hex += QString(" %1").arg(frame.data[i], 2, 16, QChar('0')).toUpper();
+    logMessage(QString("%1  ID=0x%2  DLC=%3 [%4]")
+                   .arg(dir)
+                   .arg(frame.id, 3, 16, QChar('0')).toUpper()
+                   .arg(frame.len)
+                   .arg(hex.trimmed()));
+}
+
+// ============================================================================
+// Device connection
+// ============================================================================
+void MainWindow::onDeviceToggle()
+{
+    if (m_connected) {
+        stopAllTimers();
+        m_device->stopReceive();
+        m_device->close();
+        m_connected = false;
+        m_btnConnect->setText("Connect");
+        m_lblDevStatus->setText("Disconnected");
+        m_lblDevStatus->setStyleSheet("color: #888;");
+        logMessage("Device disconnected.");
+    } else {
+        bool ok = m_device->open();
+        if (!ok) {
+            QMessageBox::warning(this, "Open Failed",
+                "Failed to open device.\n" + m_device->lastError());
+            return;
+        }
+        m_device->startReceive();
+        m_connected = true;
+        m_btnConnect->setText("Disconnect");
+        m_lblDevStatus->setText("Connected");
+        m_lblDevStatus->setStyleSheet("color: #4caf50; font-weight: bold;");
+        logMessage("Device opened successfully.");
+    }
+}
+
+void MainWindow::stopAllTimers()
+{
+    // MIT
+    if (m_mitRunning) onMitToggle();
+    // Pos-Vel
+    if (m_pvRunning)  onPvToggle();
+    // Const Vel
+    if (m_cvRunning)  onCvToggle();
+}
+
+// ============================================================================
+// MIT Tab — per-motor periodic send
+// ============================================================================
+void MainWindow::onMitToggle()
+{
+    if (m_mitRunning) {
+        m_mitTimer->stop();
+        m_mitRunning = false;
+        m_btnMitToggle->setText("Start Sending");
+        m_btnMitToggle->setStyleSheet(
+            "QPushButton { background: #2e7d32; color: white; font-weight: bold; }");
+        m_lblMitStatus->setText("");
+        m_spinMitInterval->setEnabled(true);
+    } else {
+        int ms = m_spinMitInterval->value();
+        m_mitTimer->start(ms);
+        m_mitRunning = true;
+        m_btnMitToggle->setText("Stop Sending");
+        m_btnMitToggle->setStyleSheet(
+            "QPushButton { background: #c62828; color: white; font-weight: bold; }");
+        m_lblMitStatus->setText("Running...");
+        m_spinMitInterval->setEnabled(false);
+    }
+}
+
+void MainWindow::onMitTick()
+{
+    if (!m_connected) return;
+
+    for (int i = 0; i < 3; ++i) {
+        if (!m_mitEn[i]->isChecked()) continue;
+        uint8_t mid = static_cast<uint8_t>(0x01 + i);
+        CanFdFrame f = m_proto.encodeMitCtrl(mid,
+            static_cast<float>(m_mitPos[i]->value()),
+            static_cast<float>(m_mitVel[i]->value()),
+            static_cast<float>(m_mitKp[i]->value()),
+            static_cast<float>(m_mitKd[i]->value()),
+            static_cast<float>(m_mitTff[i]->value()));
+        m_device->sendFrame(f);
+        logRawTx(f, "TX");
+    }
+}
+
+// ============================================================================
+// Pos-Vel Tab — per-motor periodic send
+// ============================================================================
+void MainWindow::onPvToggle()
+{
+    if (m_pvRunning) {
+        m_pvTimer->stop();
+        m_pvRunning = false;
+        m_btnPvToggle->setText("Start Sending");
+        m_btnPvToggle->setStyleSheet(
+            "QPushButton { background: #2e7d32; color: white; font-weight: bold; }");
+        m_lblPvStatus->setText("");
+        m_spinPvInterval->setEnabled(true);
+    } else {
+        int ms = m_spinPvInterval->value();
+        m_pvTimer->start(ms);
+        m_pvRunning = true;
+        m_btnPvToggle->setText("Stop Sending");
+        m_btnPvToggle->setStyleSheet(
+            "QPushButton { background: #c62828; color: white; font-weight: bold; }");
+        m_lblPvStatus->setText("Running...");
+        m_spinPvInterval->setEnabled(false);
+    }
+}
+
+void MainWindow::onPvTick()
+{
+    if (!m_connected) return;
+
+    for (int i = 0; i < 3; ++i) {
+        if (!m_pvEn[i]->isChecked()) continue;
+        uint8_t mid = static_cast<uint8_t>(0x01 + i);
+        CanFdFrame f = m_proto.encodePosVel(mid,
+            static_cast<float>(m_pvPos[i]->value()),
+            static_cast<float>(m_pvVelLim[i]->value()));
+        m_device->sendFrame(f);
+        logRawTx(f, "TX");
+    }
+}
+
+// ============================================================================
+// Const Vel Tab — per-motor periodic send
+// ============================================================================
+void MainWindow::onCvToggle()
+{
+    if (m_cvRunning) {
+        m_cvTimer->stop();
+        m_cvRunning = false;
+        m_btnCvToggle->setText("Start Sending");
+        m_btnCvToggle->setStyleSheet(
+            "QPushButton { background: #2e7d32; color: white; font-weight: bold; }");
+        m_lblCvStatus->setText("");
+        m_spinCvInterval->setEnabled(true);
+    } else {
+        int ms = m_spinCvInterval->value();
+        m_cvTimer->start(ms);
+        m_cvRunning = true;
+        m_btnCvToggle->setText("Stop Sending");
+        m_btnCvToggle->setStyleSheet(
+            "QPushButton { background: #c62828; color: white; font-weight: bold; }");
+        m_lblCvStatus->setText("Running...");
+        m_spinCvInterval->setEnabled(false);
+    }
+}
+
+void MainWindow::onCvTick()
+{
+    if (!m_connected) return;
+
+    for (int i = 0; i < 3; ++i) {
+        if (!m_cvEn[i]->isChecked()) continue;
+        uint8_t mid = static_cast<uint8_t>(0x01 + i);
+        CanFdFrame f = m_proto.encodeConstVel(mid,
+            static_cast<float>(m_cvVel[i]->value()));
+        m_device->sendFrame(f);
+        logRawTx(f, "TX");
+    }
+}
+
+// ============================================================================
+// System Tab — send to all checked motors
+// ============================================================================
+void MainWindow::onSendSystemCmd(int cmdCode)
+{
+    if (!m_connected) return;
+
+    for (int i = 0; i < 3; ++i) {
+        if (!m_sysEn[i]->isChecked()) continue;
+        uint8_t mid = static_cast<uint8_t>(0x01 + i);
+        CanFdFrame f = m_proto.encodeSystemCmd(mid, cmdCode);
+        m_device->sendFrame(f);
+        logRawTx(f, "TX");
+    }
+}
+
+// ============================================================================
+// Register access
+// ============================================================================
+void MainWindow::onRegRead()
+{
+    if (!m_connected) return;
+    uint8_t  mid  = static_cast<uint8_t>(m_regMotorId->value());
+    uint16_t addr = static_cast<uint16_t>(m_spinRegAddr->value());
+    CanFdFrame f = m_proto.encodeRegRead(mid, addr);
+    m_device->sendFrame(f);
+    logRawTx(f, "TX");
+}
+
+void MainWindow::onRegWrite()
+{
+    if (!m_connected) return;
+
+    bool ok = false;
+    uint32_t value = m_editRegValue->text().trimmed().toUInt(&ok, 16);
+    if (!ok) {
+        m_lblRegResult->setText("Invalid hex value: " + m_editRegValue->text());
+        m_lblRegResult->setStyleSheet("color: red; font-family: monospace;");
+        return;
+    }
+
+    uint8_t  mid  = static_cast<uint8_t>(m_regMotorId->value());
+    uint16_t addr = static_cast<uint16_t>(m_spinRegAddr->value());
+    CanFdFrame f = m_proto.encodeRegWrite(mid, addr, value);
+    m_device->sendFrame(f);
+    logRawTx(f, "TX");
+}
+
+void MainWindow::onReadAllRegs(uint8_t motor_id)
+{
+    if (!m_connected) return;
+    if (motor_id < 0x01 || motor_id > 0x03) return;
+
+    m_batchMotorIdx = motor_id - 0x01;
+    m_regBatchIdx = 0;
+
+    int mi = m_batchMotorIdx;
+    m_btnReadAllMotor[mi]->setEnabled(false);
+    m_btnReadAllMotor[mi]->setText("Reading...");
+    m_lblReadAllMotor[mi]->setText("0 / " + QString::number(m_allRegs.size()));
+
+    if (!m_batchReadTimer->isActive())
+        m_batchReadTimer->start(30);
+    onBatchReadNext();
+}
+
+void MainWindow::onBatchReadNext()
+{
+    if (!m_connected) {
+        m_batchReadTimer->stop();
+        m_regBatchIdx = 0;
+        m_batchMotorIdx = 0;
+        for (int mi = 0; mi < 3; ++mi) {
+            m_btnReadAllMotor[mi]->setEnabled(true);
+            m_btnReadAllMotor[mi]->setText("Read All");
+        }
+        return;
+    }
+
+    int mi = m_batchMotorIdx;  // 0,1,2 — current motor being read
+
+    if (m_regBatchIdx >= m_allRegs.size()) {
+        // All registers read for this motor — done
+        m_batchReadTimer->stop();
+        m_btnReadAllMotor[mi]->setEnabled(true);
+        m_btnReadAllMotor[mi]->setText("Read All");
+        m_lblReadAllMotor[mi]->setText("Done");
+        logMessage(QString("Batch register read complete (Motor 0x0%1).").arg(mi + 1));
+        return;
+    }
+
+    uint8_t mid = static_cast<uint8_t>(0x01 + mi);
+    std::vector<uint8_t> rids;
+    for (int i = 0; i < 8 && m_regBatchIdx < m_allRegs.size(); ++i, ++m_regBatchIdx)
+        rids.push_back(static_cast<uint8_t>(m_allRegs[m_regBatchIdx].addr));
+
+    CanFdFrame f = m_proto.encodeRegBlockRead(mid, rids);
+    m_device->sendFrame(f);
+
+    m_lblReadAllMotor[mi]->setText(
+        QString("%1 / %2").arg(m_regBatchIdx).arg(m_allRegs.size()));
+}
+
+// ============================================================================
+// Stats poll
+// ============================================================================
+void MainWindow::onPollTimer()
+{
+    if (++m_pollTicks < 20) return;
+
+    double hz = static_cast<double>(m_fbCount - m_lastFbCount)
+                / (m_pollTicks * 0.05);
+    m_lastFbCount = m_fbCount;
+    m_pollTicks = 0;
+
+    m_lblRxStats->setText(QString("RX: %1  |  Feedback: %2 Hz")
+                              .arg(m_rxCount)
+                              .arg(hz, 0, 'f', 1));
+}
+
+// ============================================================================
+// Receive handler
+// ============================================================================
+void MainWindow::onFrameReceived(const CanFdFrame &frame)
+{
+    ++m_rxCount;
+    YwdProtocol::FrameType ft = YwdProtocol::classifyFrame(frame.id);
+    if (ft != YwdProtocol::FT_FEEDBACK)
+        logRawTx(frame, "RX");
+
+    if (ft == YwdProtocol::FT_FEEDBACK) {
+        ++m_fbCount;
+        FeedbackFrame fb;
+        if (m_proto.decodeFeedback(frame, fb)) {
+            m_lastFeedback[fb.motor_id] = fb;
+            updateFeedbackTable(fb);
+            m_plotPanel_->pushFeedback(fb);
+            m_fbValid = true;
+        }
+    } else if (ft == YwdProtocol::FT_PARAM_RESP) {
+        ParamResponse resp;
+        if (m_proto.decodeParamResponse(frame, resp)) {
+            logMessage(
+                QString("RegResp <- Motor 0x%1 addr=0x%2 val=0x%3 %4")
+                    .arg(frame.id & 0x7F, 2, 16, QChar('0'))
+                    .arg(resp.addr, 2, 16, QChar('0'))
+                    .arg(resp.value, 8, 16, QChar('0'))
+                    .arg(resp.success ? "" : "FAIL"));
+
+            m_proto.applyRegScaling(resp.addr, resp.value);
+
+            if (!resp.is_write) {
+                updateRegTableValue(frame.id & 0x7F, resp.addr, resp.rstat, resp.value);
+                m_lblRegResult->setText(
+                    QString("0x%1 = 0x%2")
+                        .arg(resp.addr, 2, 16, QChar('0'))
+                        .arg(resp.value, 8, 16, QChar('0')));
+                m_lblRegResult->setStyleSheet("color: green; font-family: monospace;");
+                m_editRegValue->setText("0x" + hexStr(resp.value, 8));
+            } else {
+                m_lblRegResult->setText("Write OK");
+                m_lblRegResult->setStyleSheet("color: green; font-family: monospace;");
+            }
+        }
+
+        std::vector<ParamResponse> vec;
+        if (m_proto.decodeRegBlockResponse(frame, vec)) {
+            for (auto &r : vec) {
+                logMessage(
+                    QString("RegBlk <- Motor 0x%1 addr=0x%2 val=0x%3 %4")
+                        .arg(frame.id & 0x7F, 2, 16, QChar('0'))
+                        .arg(r.addr, 2, 16, QChar('0'))
+                        .arg(r.value, 8, 16, QChar('0'))
+                        .arg(r.success ? "" : "FAIL"));
+                m_proto.applyRegScaling(r.addr, r.value);
+                updateRegTableValue(frame.id & 0x7F, r.addr, r.rstat, r.value);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Multi-motor feedback table update
+// ============================================================================
+void MainWindow::updateFeedbackTable(const FeedbackFrame &fb)
+{
+    int row = -1;
+    for (int r = 0; r < m_feedbackTable->rowCount(); ++r) {
+        auto *item = m_feedbackTable->item(r, 0);
+        if (item && item->text() == QString("0x%1").arg(fb.motor_id, 2, 16, QChar('0')).toUpper()) {
+            row = r;
+            break;
+        }
+    }
+    if (row < 0) {
+        row = m_feedbackTable->rowCount();
+        m_feedbackTable->insertRow(row);
+    }
+
+    auto setItem = [&](int col, const QString &text) {
+        auto *it = m_feedbackTable->item(row, col);
+        if (!it) {
+            it = new QTableWidgetItem(text);
+            m_feedbackTable->setItem(row, col, it);
+        } else {
+            it->setText(text);
+        }
+    };
+
+    static const char *stateNames[] = {
+        "0:Init","1:Idle","2:Calib","3:Ready","4:Run","5:Stop",
+        "6:Error","7:Test","8:DFU","9:??" };
+    const char *sn = (fb.state < 10) ? stateNames[fb.state] : "?";
+
+    setItem(0, QString("0x%1").arg(fb.motor_id, 2, 16, QChar('0')).toUpper());
+    setItem(1, QString::fromUtf8(sn));
+    setItem(2, QString::number(fb.mode));
+    setItem(3, QString::number(fb.position, 'f', 4));
+    setItem(4, QString::number(fb.velocity, 'f', 4));
+    setItem(5, QString::number(fb.torque,   'f', 4));
+    setItem(6, QString::number(fb.voltage,  'f', 2));
+    setItem(7, QString::number(fb.temp_mos)   + " °C");
+    setItem(8, QString::number(fb.temp_motor) + " °C");
+    setItem(9, QString::number(fb.seq));
+
+    for (int c = 0; c < m_feedbackTable->columnCount(); ++c) {
+        auto *it = m_feedbackTable->item(row, c);
+        if (it) {
+            QColor bg = (fb.fault != 0) ? QColor(0x55, 0x22, 0x22)
+                                         : QColor(0x23, 0x23, 0x23);
+            it->setBackground(bg);
+        }
+    }
+}
+
+// ============================================================================
+// Register table per-motor value + RSTAT update
+// Each motor page table: Addr(0)|Name(1)|Value(2)|RSTAT(3)
+// ============================================================================
+void MainWindow::updateRegTableValue(uint8_t motor_id, uint8_t addr, uint8_t rstat, uint32_t value)
+{
+    // Cache for later refreshes
+    int mi = motor_id - 0x01;   // 0,1,2
+    if (mi < 0 || mi > 2) return;
+    m_regValues[mi][addr] = value;
+    m_regValid[mi][addr]  = true;
+    m_regRstat[mi][addr]  = rstat;
+
+    // RSTAT decoded string per §8.3
+    static const char *rstatNames[] = {
+        "OK", "Unknown RID", "Read-only", "Out of range", "State forbid"
+    };
+    QString rstatStr;
+    if (rstat < 5)
+        rstatStr = QString("%1 (0x%2)").arg(rstatNames[rstat]).arg(rstat, 2, 16, QChar('0'));
+    else
+        rstatStr = QString("0x%1").arg(rstat, 2, 16, QChar('0'));
+
+    // Determine decoded value string from the register catalogue
+    QString decoded;
+    for (const auto &reg : m_allRegs) {
+        if (reg.addr != addr) continue;
+        if (reg.data_type == QStringLiteral("float32")) {
+            float f;
+            memcpy(&f, &value, sizeof(f));
+            if (std::isfinite(f))
+                decoded = QString::number(f, 'f', 4);
+            else
+                decoded = QString("0x%1").arg(value, 8, 16, QChar('0')).toUpper();
+        } else {
+            decoded = QString::number(value);
+        }
+        break;
+    }
+    if (decoded.isEmpty())
+        decoded = QString("0x%1").arg(value, 8, 16, QChar('0')).toUpper();
+
+    // Columns: 0=Addr  1=Name  2=Value  3=RSTAT
+    static const int colVal   = 2;
+    static const int colRstat = 3;
+
+    QTableWidget *tbl = m_regTables[mi];
+
+    // Update table row
+    for (int r = 0; r < tbl->rowCount(); ++r) {
+        auto *it = tbl->item(r, 0);
+        if (!it) continue;
+        bool ok;
+        uint16_t rowAddr = it->text().toUInt(&ok, 16);
+        if (ok && rowAddr == addr) {
+            auto *vi = tbl->item(r, colVal);
+            if (!vi) {
+                vi = new QTableWidgetItem();
+                tbl->setItem(r, colVal, vi);
+            }
+            vi->setText(decoded);
+
+            auto *si = tbl->item(r, colRstat);
+            if (!si) {
+                si = new QTableWidgetItem();
+                tbl->setItem(r, colRstat, si);
+            }
+            si->setText(rstatStr);
+
+            // Color RSTAT: green for OK, red for errors
+            if (rstat == 0x00)
+                si->setForeground(QColor("#4caf50"));
+            else
+                si->setForeground(QColor("#ef5350"));
+            return;
+        }
+    }
+}
