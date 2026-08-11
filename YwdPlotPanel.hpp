@@ -9,7 +9,6 @@
 #include "YwdDiagramWidget.hpp"
 #include "ywd_protocol.h"
 
-class QComboBox;
 class QPushButton;
 class QSplitter;
 class QTimer;
@@ -33,6 +32,9 @@ public:
     // Set external update timer (created/managed by MainWindow)
     void setUpdateTimer(QTimer *timer);
 
+    // Update the diagram timer interval dynamically (e.g. derived from send rate)
+    void setUpdateInterval(int ms);
+
     // Clear all history
     void clearHistory();
 
@@ -44,7 +46,6 @@ signals:
 
 private slots:
     void onAddDiagram();
-    void onFrequencyChanged(int index);
     void onLiveToggled(bool on);
     void onDiagramRequestClose(YwdDiagramWidget *which);
 
@@ -53,7 +54,6 @@ private:
 
     // ── UI ────────────────────────────────────────────────────
     QPushButton *m_addButton_  = nullptr;
-    QComboBox   *m_freqCombo_  = nullptr;
     QToolButton *m_liveBtn_    = nullptr;
     QToolButton *m_clearBtn_   = nullptr;
     QSplitter   *m_splitter_   = nullptr;
@@ -69,7 +69,8 @@ private:
     int totalSamples_    = 0;
     double samplePeriod_ = 0.05;        // seconds
 
-    int  m_maxPoints_    = 250;
-    bool m_liveMode_     = true;
-    bool m_hasNewData_   = false;
+    int  m_maxPoints_          = 250;
+    bool m_liveMode_           = true;
+    bool m_hasNewData_         = false;
+    int  m_pauseTotalSamples_  = 0;    // totalSamples_ snapshot at pause entry
 };

@@ -13,6 +13,7 @@
 #include <QScrollBar>
 #include <cstring>
 #include <cmath>
+#include <climits>
 
 // ============================================================================
 // Helpers
@@ -608,12 +609,14 @@ void MainWindow::onMitToggle()
         int ms = m_spinMitInterval->value();
         m_mitTimer->start(ms);
         m_mitRunning = true;
+        m_plotPanel_->clearHistory();
         m_btnMitToggle->setText("Stop Sending");
         m_btnMitToggle->setStyleSheet(
             "QPushButton { background: #c62828; color: white; font-weight: bold; }");
         m_lblMitStatus->setText("Running...");
         m_spinMitInterval->setEnabled(false);
     }
+    updateDiagramTiming();
 }
 
 void MainWindow::onMitTick()
@@ -651,12 +654,14 @@ void MainWindow::onPvToggle()
         int ms = m_spinPvInterval->value();
         m_pvTimer->start(ms);
         m_pvRunning = true;
+        m_plotPanel_->clearHistory();
         m_btnPvToggle->setText("Stop Sending");
         m_btnPvToggle->setStyleSheet(
             "QPushButton { background: #c62828; color: white; font-weight: bold; }");
         m_lblPvStatus->setText("Running...");
         m_spinPvInterval->setEnabled(false);
     }
+    updateDiagramTiming();
 }
 
 void MainWindow::onPvTick()
@@ -691,12 +696,14 @@ void MainWindow::onCvToggle()
         int ms = m_spinCvInterval->value();
         m_cvTimer->start(ms);
         m_cvRunning = true;
+        m_plotPanel_->clearHistory();
         m_btnCvToggle->setText("Stop Sending");
         m_btnCvToggle->setStyleSheet(
             "QPushButton { background: #c62828; color: white; font-weight: bold; }");
         m_lblCvStatus->setText("Running...");
         m_spinCvInterval->setEnabled(false);
     }
+    updateDiagramTiming();
 }
 
 void MainWindow::onCvTick()
@@ -711,6 +718,24 @@ void MainWindow::onCvTick()
         m_device->sendFrame(f);
         logRawTx(f, "TX");
     }
+}
+
+// ============================================================================
+// Derive diagram update interval from active send interval(s).
+// Diagram update = send_interval × 10  (e.g. send 100 ms → diagram 1000 ms).
+// Uses the minimum of currently active send intervals if more than one tab is running.
+// ============================================================================
+void MainWindow::updateDiagramTiming()
+{
+    int minMs = INT_MAX;
+    if (m_mitRunning)  minMs = std::min(minMs, m_spinMitInterval->value());
+    if (m_pvRunning)   minMs = std::min(minMs, m_spinPvInterval->value());
+    if (m_cvRunning)   minMs = std::min(minMs, m_spinCvInterval->value());
+
+    if (minMs == INT_MAX)
+        return;   // no send active — keep current interval
+
+    m_plotPanel_->setUpdateInterval(minMs * 10);
 }
 
 // ============================================================================

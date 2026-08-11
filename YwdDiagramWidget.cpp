@@ -283,7 +283,7 @@ void YwdDiagramWidget::ensureSeries(uint8_t motorId)
 
     auto *s = new QLineSeries;
     s->setName(QStringLiteral("M%1").arg(motorId, 2, 16, QChar('0')));
-    QColor c = colorForMotor(motorId);
+    QColor c = colorForMotor(motorId - 1);
     QPen pen(c, 1.5);
     s->setPen(pen);
     m_chart_->addSeries(s);
@@ -373,29 +373,39 @@ void YwdDiagramWidget::renderWindow(const std::deque<MotorSnapshot> &history,
             double t = (gi + 1) * samplePeriodSec;   // 1-based
             pts.append(QPointF(t, val));
 
-            if (val < yMinVal) yMinVal = val * 1.2;
-            if (val > yMaxVal) yMaxVal = val * 1.2;
+            if (val < yMinVal) yMinVal = val;
+            if (val > yMaxVal) yMaxVal = val;
         }
 
         motorIt->series->replace(pts);
     }
 
     // X axis — ensure visible window even for single point
-    double xSpan = xMax - xMin;
-    if (xSpan < 1e-6) {
-        double pad = std::max(0.5, samplePeriodSec * 2.0);
-        m_axisX_->setRange(xMin - pad, xMax + pad);
-    } else {
-        m_axisX_->setRange(xMin, xMax);
+    // In pause mode, only update ranges on scroll changes —
+    // otherwise preserve the user's rubber-band zoom.
+    bool rangesChanged = true;
+    if (!m_liveMode_) {
+        rangesChanged = (m_scrollOffset_ != m_lastScrollOffset_);
+        m_lastScrollOffset_ = m_scrollOffset_;
     }
 
-    // Y axis — add 10% margin
-    if (yMinVal < yMaxVal) {
-        double ym = (yMaxVal - yMinVal) * 0.1;
-        if (ym < 1e-6) ym = 0.5;
-        m_axisY_->setRange(yMinVal - ym, yMaxVal + ym);
-    } else {
-        m_axisY_->setRange(yMinVal - 0.5, yMinVal + 0.5);
+    if (rangesChanged) {
+        double xSpan = xMax - xMin;
+        if (xSpan < 1e-6) {
+            double pad = std::max(0.5, samplePeriodSec * 2.0);
+            m_axisX_->setRange(xMin - pad, xMax + pad);
+        } else {
+            m_axisX_->setRange(xMin, xMax);
+        }
+
+        // Y axis — add 10% margin
+        if (yMinVal < yMaxVal) {
+            double ym = (yMaxVal - yMinVal) * 0.1;
+            if (ym < 1e-6) ym = 0.5;
+            m_axisY_->setRange(yMinVal - ym, yMaxVal + ym);
+        } else {
+            m_axisY_->setRange(yMinVal - 0.5, yMinVal + 0.5);
+        }
     }
 
     // Live / history button states
@@ -422,4 +432,11 @@ void YwdDiagramWidget::onNextClicked()
 void YwdDiagramWidget::onResetZoom()
 {
     m_chart_->zoomReset();
+}
+
+void YwdDiagramWidget::setLiveMode(bool on) 
+{ 
+    m_liveMode_ = on; 
+    m_prevBtn_->setVisible(!m_liveMode_);
+    m_nextBtn_->setVisible(!m_liveMode_);
 }

@@ -77,7 +77,7 @@ public:
     // Configure display
     void setMaxPoints(int n)  { m_maxPoints_ = n; }
     void setSamplePeriod(double t) { m_samplePeriod_ = t; }
-    void setLiveMode(bool on) { m_liveMode_ = on; }
+    void setLiveMode(bool on);
 
     // History-mode scroll offset (in samples, 0 = newest)
     int  scrollOffset() const { return m_scrollOffset_; }
@@ -144,5 +144,6 @@ private:
     bool m_rebuildPending_ = false;
 
     // ── Scroll position in history mode ──────────────────────
-    int m_scrollOffset_ = 0;    // offset in deque indices
+    int m_scrollOffset_       = 0;    // offset in deque indices
+    int m_lastScrollOffset_   = -1;   // used to detect scroll change (pause zoom gate)
 };

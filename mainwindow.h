@@ -77,6 +77,9 @@ private:
     QWidget *makeSpinRow(const QString &label,
                          QDoubleSpinBox *s0, QDoubleSpinBox *s1, QDoubleSpinBox *s2);
 
+    // Helper: derive diagram update interval from the active send timers
+    void updateDiagramTiming();
+
     // Helper: create a standard double spinbox
     static QDoubleSpinBox *makeDblSpin(double min, double max, int decimals, double val);
 
