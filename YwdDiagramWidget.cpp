@@ -47,38 +47,9 @@ YwdDiagramWidget::YwdDiagramWidget(QWidget *parent)
 // ============================================================================
 void YwdDiagramWidget::buildUi()
 {
-    auto *root = new QHBoxLayout(this);
+    auto *root = new QVBoxLayout(this);
     root->setContentsMargins(2, 2, 2, 2);
     root->setSpacing(2);
-
-    // ── Left: motor checkboxes ────────────────────────────────
-    auto *leftPanel = new QVBoxLayout;
-    leftPanel->setContentsMargins(2, 2, 2, 2);
-
-    m_globalCheck_ = new QCheckBox(QStringLiteral("All"), this);
-    m_globalCheck_->setTristate(true);
-    m_globalCheck_->setChecked(false);
-    connect(m_globalCheck_, &QCheckBox::toggled,
-            this, &YwdDiagramWidget::onGlobalToggled);
-    leftPanel->addWidget(m_globalCheck_);
-
-    m_scrollArea_ = new QScrollArea(this);
-    m_scrollArea_->setWidgetResizable(true);
-    m_scrollArea_->setMinimumWidth(120);
-    m_scrollArea_->setMaximumWidth(180);
-    m_checkContainer_ = new QWidget;
-    m_checkLayout_ = new QVBoxLayout(m_checkContainer_);
-    m_checkLayout_->setContentsMargins(2, 2, 2, 2);
-    m_checkLayout_->setSpacing(1);
-    m_scrollArea_->setWidget(m_checkContainer_);
-    leftPanel->addWidget(m_scrollArea_, 1);
-
-    root->addLayout(leftPanel);
-
-    // ── Right: chart area ─────────────────────────────────────
-    auto *rightPanel = new QVBoxLayout;
-    rightPanel->setContentsMargins(2, 2, 2, 2);
-    rightPanel->setSpacing(2);
 
     // Top bar
     auto *topRow = new QHBoxLayout;
@@ -111,13 +82,6 @@ void YwdDiagramWidget::buildUi()
             this, &YwdDiagramWidget::onNextClicked);
     topRow->addWidget(m_nextBtn_);
 
-    m_liveBtn_ = new QPushButton(QStringLiteral("Live"), this);
-    m_liveBtn_->setCheckable(true);
-    m_liveBtn_->setChecked(true);
-    m_liveBtn_->setFixedWidth(48);
-    connect(m_liveBtn_, &QPushButton::toggled,
-            this, &YwdDiagramWidget::onLiveToggled);
-    topRow->addWidget(m_liveBtn_);
 
     m_resetZoomBtn_ = new QPushButton(QStringLiteral("Res.Zoom"), this);
     m_resetZoomBtn_->setFixedWidth(64);
@@ -126,6 +90,17 @@ void YwdDiagramWidget::buildUi()
     topRow->addWidget(m_resetZoomBtn_);
 
     topRow->addStretch();
+
+    for (uint8_t mId = 1; mId <= 3; mId ++)
+    {
+        m_motors_[mId].motorId = mId;
+        m_motors_[mId].checkBox = new QCheckBox(
+            QStringLiteral("Motor %1").arg(m_motors_[mId].motorId, 2, 16, QChar('0')));
+        m_motors_[mId].checkBox->setChecked(false);
+        connect(m_motors_[mId].checkBox, &QCheckBox::toggled,
+                this, &YwdDiagramWidget::onMotorToggled);
+        topRow->addWidget(m_motors_[mId].checkBox);
+    }
 
     m_title_ = new QLabel(QStringLiteral("  "), this);
     m_title_->setStyleSheet("font-weight:bold; color:#00b4ff;");
@@ -138,7 +113,7 @@ void YwdDiagramWidget::buildUi()
     });
     topRow->addWidget(m_closeBtn_);
 
-    rightPanel->addLayout(topRow);
+    root->addLayout(topRow);
 
     // Chart — styled to match the application-wide dark theme
     m_chart_ = new QChart;
@@ -181,7 +156,7 @@ void YwdDiagramWidget::buildUi()
     m_chartView_ = new QChartView(m_chart_, this);
     m_chartView_->setRenderHint(QPainter::Antialiasing, true);
     m_chartView_->setRubberBand(QChartView::RectangleRubberBand);
-    rightPanel->addWidget(m_chartView_, 1);
+    root->addWidget(m_chartView_, 1);
 
     // Placeholder / empty state
     m_emptyLabel_ = new QLabel(QStringLiteral("No motor data yet.  Waiting for feedback frames..."),
@@ -193,8 +168,6 @@ void YwdDiagramWidget::buildUi()
     m_emptyLabel_->setGeometry(0, 0, m_chartView_->width(), m_chartView_->height());
     // Keep the overlay in sync when the chart view is resized
     m_chartView_->installEventFilter(this);
-
-    root->addLayout(rightPanel, 1);
 }
 
 // ============================================================================
@@ -240,79 +213,6 @@ void YwdDiagramWidget::updateSignalListFromSnapshot(const MotorSnapshot &latest)
 }
 
 // ============================================================================
-// Rebuild the motor checkbox tree
-// ============================================================================
-void YwdDiagramWidget::rebuildMotorCheckboxes()
-{
-    // Remove old checkboxes
-    for (auto &entry : m_motors_) {
-        if (entry.checkBox) {
-            m_checkLayout_->removeWidget(entry.checkBox);
-            entry.checkBox->deleteLater();
-            entry.checkBox = nullptr;
-        }
-    }
-
-    // Remove orphan series from chart (keep motor entries for series cache)
-    for (auto &entry : m_motors_) {
-        if (entry.series) {
-            m_chart_->removeSeries(entry.series);
-            delete entry.series;
-            entry.series = nullptr;
-        }
-    }
-
-    QMap<uint8_t, MotorEntry> keep;
-    for (uint8_t id : m_knownMotors_) {
-        keep[id].motorId = id;
-    }
-    m_motors_ = std::move(keep);
-
-    // Create checkboxes
-    for (auto it = m_motors_.begin(); it != m_motors_.end(); ++it) {
-        it->checkBox = new QCheckBox(
-            QStringLiteral("Motor 0x%1").arg(it->motorId, 2, 16, QChar('0')),
-            m_checkContainer_);
-        it->checkBox->setChecked(true);
-        connect(it->checkBox, &QCheckBox::toggled,
-                this, &YwdDiagramWidget::onMotorToggled);
-        m_checkLayout_->addWidget(it->checkBox);
-    }
-
-    // Rebuild series for checked motors
-    for (auto it = m_motors_.begin(); it != m_motors_.end(); ++it) {
-        if (it->checkBox && it->checkBox->isChecked())
-            ensureSeries(it->motorId);
-    }
-
-    // Re-evaluate global checkbox
-    updateTitle();
-
-    m_rebuildPending_ = false;
-    m_emptyLabel_->setVisible(m_knownMotors_.isEmpty());
-    m_resetZoomBtn_->setVisible(!m_knownMotors_.isEmpty());
-}
-
-// ============================================================================
-// Global checkbox handler
-// ============================================================================
-void YwdDiagramWidget::onGlobalToggled(bool checked)
-{
-    for (auto it = m_motors_.begin(); it != m_motors_.end(); ++it) {
-        if (it->checkBox) {
-            it->checkBox->blockSignals(true);
-            it->checkBox->setChecked(checked);
-            it->checkBox->blockSignals(false);
-        }
-        if (checked)
-            ensureSeries(it->motorId);
-        else
-            dropSeries(it->motorId);
-    }
-    updateTitle();
-}
-
-// ============================================================================
 // Individual motor toggle
 // ============================================================================
 void YwdDiagramWidget::onMotorToggled()
@@ -348,6 +248,7 @@ void YwdDiagramWidget::onSignalTypeChanged(int index)
         if (it->checkBox && it->checkBox->isChecked())
             ensureSeries(it->motorId);
     }
+    updateTitle();
 }
 
 // ============================================================================
@@ -366,16 +267,6 @@ void YwdDiagramWidget::updateTitle()
                           .arg(active)
                           .arg(total)
                           .arg(signalTypeName(m_signalType_)));
-
-    // Update global checkbox tri-state
-    m_globalCheck_->blockSignals(true);
-    if (active == 0)
-        m_globalCheck_->setCheckState(Qt::Unchecked);
-    else if (active == total && total > 0)
-        m_globalCheck_->setCheckState(Qt::Checked);
-    else
-        m_globalCheck_->setCheckState(Qt::PartiallyChecked);
-    m_globalCheck_->blockSignals(false);
 }
 
 // ============================================================================
@@ -453,8 +344,6 @@ void YwdDiagramWidget::renderWindow(const std::deque<MotorSnapshot> &history,
                                      int endDequeIdx,
                                      double xMin, double xMax)
 {
-    if (m_rebuildPending_)
-        rebuildMotorCheckboxes();
 
     const int count = endDequeIdx - startDequeIdx + 1;
     if (count <= 0) return;
@@ -484,8 +373,8 @@ void YwdDiagramWidget::renderWindow(const std::deque<MotorSnapshot> &history,
             double t = (gi + 1) * samplePeriodSec;   // 1-based
             pts.append(QPointF(t, val));
 
-            if (val < yMinVal) yMinVal = val;
-            if (val > yMaxVal) yMaxVal = val;
+            if (val < yMinVal) yMinVal = val * 1.2;
+            if (val > yMaxVal) yMaxVal = val * 1.2;
         }
 
         motorIt->series->replace(pts);
@@ -510,9 +399,11 @@ void YwdDiagramWidget::renderWindow(const std::deque<MotorSnapshot> &history,
     }
 
     // Live / history button states
-    m_liveBtn_->setChecked(m_liveMode_);
+    if (m_liveMode_) m_scrollOffset_ = 0;
     m_prevBtn_->setVisible(!m_liveMode_);
     m_nextBtn_->setVisible(!m_liveMode_);
+
+    updateTitle();
 }
 
 // ============================================================================
@@ -526,15 +417,6 @@ void YwdDiagramWidget::onPrevClicked()
 void YwdDiagramWidget::onNextClicked()
 {
     m_scrollOffset_ = std::max(0, m_scrollOffset_ - 20);
-}
-
-void YwdDiagramWidget::onLiveToggled(bool on)
-{
-    m_liveMode_ = on;
-    m_liveBtn_->setText(on ? QStringLiteral("Live") : QStringLiteral("History"));
-    m_prevBtn_->setVisible(!on);
-    m_nextBtn_->setVisible(!on);
-    if (on) m_scrollOffset_ = 0;
 }
 
 void YwdDiagramWidget::onResetZoom()

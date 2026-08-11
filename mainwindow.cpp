@@ -296,7 +296,7 @@ void MainWindow::setupUi()
 
     m_logView = new QTextEdit();
     m_logView->setReadOnly(true);
-    m_logView->setMinimumHeight(60);
+    m_logView->setFixedHeight(100);
     m_logView->setFont(QFont("monospace", 9));
     m_logView->setStyleSheet("background: #1e1e1e; color: #d4d4d4;");
     m_logView->document()->setMaximumBlockCount(2000);
@@ -355,7 +355,7 @@ void MainWindow::buildMitTab()
         auto *row = new QHBoxLayout();
         row->addWidget(new QLabel("Interval:"));
         m_spinMitInterval = new QSpinBox();
-        m_spinMitInterval->setRange(10, 5000);
+        m_spinMitInterval->setRange(1, 5000);
         m_spinMitInterval->setValue(100);
         m_spinMitInterval->setSuffix(" ms");
         m_spinMitInterval->setFixedWidth(90);

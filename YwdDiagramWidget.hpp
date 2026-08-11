@@ -95,7 +95,6 @@ private slots:
     void onSignalTypeChanged(int index);
     void onPrevClicked();
     void onNextClicked();
-    void onLiveToggled(bool on);
     void onResetZoom();
 
 private:
@@ -121,10 +120,6 @@ private:
     QPushButton   *m_closeBtn_    = nullptr;
     QLabel        *m_title_       = nullptr;
     QLabel        *m_emptyLabel_  = nullptr;
-    QScrollArea   *m_scrollArea_  = nullptr;
-    QWidget       *m_checkContainer_= nullptr;
-    QVBoxLayout   *m_checkLayout_ = nullptr;
-    QCheckBox     *m_globalCheck_ = nullptr;
 
     // ── Chart ─────────────────────────────────────────────────
     QChart         *m_chart_     = nullptr;
