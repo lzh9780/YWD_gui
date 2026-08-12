@@ -21,6 +21,10 @@
 #include "ywd_protocol.h"
 #include "YwdPlotPanel.hpp"
 
+// A motor can be commanded by exactly one control mode at a time.
+// System-tab commands (Enable/Disable/...) are exempt from this rule.
+enum MotorControlMode { MODE_NONE = 0, MODE_MIT = 1, MODE_PV = 2, MODE_CV = 3 };
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -70,6 +74,8 @@ private:
     void buildPosVelTab();
     void buildConstVelTab();
     void buildSystemTab();
+    // Same-motor checkbox mutual exclusion across the three control-mode tabs
+    void setupModeCheckboxExclusion();
     void logMessage(const QString &msg);
     void logRawTx(const CanFdFrame &frame, const QString &dir);
     void updateFeedbackTable(const FeedbackFrame &fb);
@@ -84,6 +90,11 @@ private:
 
     // Helper: derive diagram update interval from the active send timers
     void updateDiagramTiming();
+
+    // Helpers for the one-control-mode-per-motor rule
+    bool    modeHasMotors(int mode) const;
+    QString modeMotorList(int mode) const;
+    void    refreshModeLabels();
 
     // Helper: create a standard double spinbox
     static QDoubleSpinBox *makeDblSpin(double min, double max, int decimals, double val);
@@ -126,6 +137,11 @@ private:
     QLabel         *m_lblCvStatus;
     QTimer         *m_cvTimer;
     bool            m_cvRunning = false;
+
+    // --- One control mode per motor ---
+    // Ownership of each motor (0x01..0x03): MODE_NONE / MODE_MIT / MODE_PV / MODE_CV.
+    // System-tab commands are exempt from this rule.
+    int m_motorMode[3] = {MODE_NONE, MODE_NONE, MODE_NONE};
 
     // System tab — 3 motor checkboxes
     QCheckBox   *m_sysEn[3];

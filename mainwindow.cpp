@@ -162,6 +162,7 @@ void MainWindow::setupUi()
     buildPosVelTab();
     buildConstVelTab();
     buildSystemTab();
+    setupModeCheckboxExclusion();
 
     leftV->addWidget(m_cmdTabs);
 
@@ -357,7 +358,7 @@ void MainWindow::buildMitTab()
         row->addWidget(new QLabel("Interval:"));
         m_spinMitInterval = new QSpinBox();
         m_spinMitInterval->setRange(1, 5000);
-        m_spinMitInterval->setValue(100);
+        m_spinMitInterval->setValue(10);
         m_spinMitInterval->setSuffix(" ms");
         m_spinMitInterval->setFixedWidth(90);
         row->addWidget(m_spinMitInterval);
@@ -391,7 +392,7 @@ void MainWindow::buildPosVelTab()
         row->addWidget(new QLabel("Motor:"));
         for (int i = 0; i < 3; ++i) {
             m_pvEn[i] = new QCheckBox(QString("0x0%1").arg(i + 1));
-            m_pvEn[i]->setChecked(true);
+            m_pvEn[i]->setChecked(false);   // default control mode = MIT
             row->addWidget(m_pvEn[i]);
         }
         row->addStretch();
@@ -411,7 +412,7 @@ void MainWindow::buildPosVelTab()
         row->addWidget(new QLabel("Interval:"));
         m_spinPvInterval = new QSpinBox();
         m_spinPvInterval->setRange(10, 5000);
-        m_spinPvInterval->setValue(100);
+        m_spinPvInterval->setValue(10);
         m_spinPvInterval->setSuffix(" ms");
         m_spinPvInterval->setFixedWidth(90);
         row->addWidget(m_spinPvInterval);
@@ -445,7 +446,7 @@ void MainWindow::buildConstVelTab()
         row->addWidget(new QLabel("Motor:"));
         for (int i = 0; i < 3; ++i) {
             m_cvEn[i] = new QCheckBox(QString("0x0%1").arg(i + 1));
-            m_cvEn[i]->setChecked(true);
+            m_cvEn[i]->setChecked(false);   // default control mode = MIT
             row->addWidget(m_cvEn[i]);
         }
         row->addStretch();
@@ -463,7 +464,7 @@ void MainWindow::buildConstVelTab()
         row->addWidget(new QLabel("Interval:"));
         m_spinCvInterval = new QSpinBox();
         m_spinCvInterval->setRange(10, 5000);
-        m_spinCvInterval->setValue(100);
+        m_spinCvInterval->setValue(10);
         m_spinCvInterval->setSuffix(" ms");
         m_spinCvInterval->setFixedWidth(90);
         row->addWidget(m_spinCvInterval);
@@ -529,6 +530,35 @@ void MainWindow::buildSystemTab()
     vl->addLayout(grid);
     vl->addStretch();
     m_cmdTabs->addTab(w, "System");
+}
+
+// ============================================================================
+// Same-motor checkbox mutual exclusion across the control-mode tabs.
+// Checking a motor in one mode unchecks it in the other two, so every motor
+// has at most one control mode. System-tab checkboxes are excluded.
+// ============================================================================
+void MainWindow::setupModeCheckboxExclusion()
+{
+    for (int i = 0; i < 3; ++i) {
+        connect(m_mitEn[i], &QCheckBox::toggled, this, [this, i](bool checked) {
+            if (checked) {
+                m_pvEn[i]->setChecked(false);
+                m_cvEn[i]->setChecked(false);
+            }
+        });
+        connect(m_pvEn[i], &QCheckBox::toggled, this, [this, i](bool checked) {
+            if (checked) {
+                m_mitEn[i]->setChecked(false);
+                m_cvEn[i]->setChecked(false);
+            }
+        });
+        connect(m_cvEn[i], &QCheckBox::toggled, this, [this, i](bool checked) {
+            if (checked) {
+                m_mitEn[i]->setChecked(false);
+                m_pvEn[i]->setChecked(false);
+            }
+        });
+    }
 }
 
 // ============================================================================
@@ -600,12 +630,26 @@ void MainWindow::onMitToggle()
     if (m_mitRunning) {
         m_mitTimer->stop();
         m_mitRunning = false;
+        // Release motors owned by MIT so another mode can take them.
+        for (int i = 0; i < 3; ++i)
+            if (m_motorMode[i] == MODE_MIT) m_motorMode[i] = MODE_NONE;
         m_btnMitToggle->setText("Start Sending");
         m_btnMitToggle->setStyleSheet(
             "QPushButton { background: #2e7d32; color: white; font-weight: bold; }");
-        m_lblMitStatus->setText("");
         m_spinMitInterval->setEnabled(true);
     } else {
+        // Take over every checked motor — each motor keeps exactly one
+        // control mode (System commands are exempt).
+        QString taken;
+        for (int i = 0; i < 3; ++i) {
+            if (!m_mitEn[i]->isChecked()) continue;
+            if (m_motorMode[i] != MODE_NONE && m_motorMode[i] != MODE_MIT)
+                taken += QString("0x0%1 ").arg(i + 1);
+            m_motorMode[i] = MODE_MIT;
+        }
+        if (!taken.isEmpty())
+            logMessage(QString("MIT takes over motor(s): %1").arg(taken));
+
         int ms = m_spinMitInterval->value();
         m_mitTimer->start(ms);
         m_mitRunning = true;
@@ -613,9 +657,13 @@ void MainWindow::onMitToggle()
         m_btnMitToggle->setText("Stop Sending");
         m_btnMitToggle->setStyleSheet(
             "QPushButton { background: #c62828; color: white; font-weight: bold; }");
-        m_lblMitStatus->setText("Running...");
         m_spinMitInterval->setEnabled(false);
+
+        // Tabs that no longer control any motor stop automatically.
+        if (m_pvRunning && !modeHasMotors(MODE_PV)) onPvToggle();
+        if (m_cvRunning && !modeHasMotors(MODE_CV)) onCvToggle();
     }
+    refreshModeLabels();
     updateDiagramTiming();
 }
 
@@ -624,7 +672,12 @@ void MainWindow::onMitTick()
     if (!m_connected) return;
 
     for (int i = 0; i < 3; ++i) {
-        if (!m_mitEn[i]->isChecked()) continue;
+        if (!m_mitEn[i]->isChecked()) {
+            // Motor deselected mid-run → release it for other modes.
+            if (m_motorMode[i] == MODE_MIT) m_motorMode[i] = MODE_NONE;
+            continue;
+        }
+        if (m_motorMode[i] != MODE_MIT) continue;   // taken over by another mode
         uint8_t mid = static_cast<uint8_t>(0x01 + i);
         CanFdFrame f = m_proto.encodeMitCtrl(mid,
             static_cast<float>(m_mitPos[i]->value()),
@@ -635,6 +688,13 @@ void MainWindow::onMitTick()
         m_device->sendFrame(f);
         logRawTx(f, "TX");
     }
+
+    // If every motor was taken over, auto-stop this tab.
+    if (m_mitRunning && !modeHasMotors(MODE_MIT)) {
+        onMitToggle();
+        return;
+    }
+    refreshModeLabels();
 }
 
 // ============================================================================
@@ -645,12 +705,26 @@ void MainWindow::onPvToggle()
     if (m_pvRunning) {
         m_pvTimer->stop();
         m_pvRunning = false;
+        // Release motors owned by Pos-Vel so another mode can take them.
+        for (int i = 0; i < 3; ++i)
+            if (m_motorMode[i] == MODE_PV) m_motorMode[i] = MODE_NONE;
         m_btnPvToggle->setText("Start Sending");
         m_btnPvToggle->setStyleSheet(
             "QPushButton { background: #2e7d32; color: white; font-weight: bold; }");
-        m_lblPvStatus->setText("");
         m_spinPvInterval->setEnabled(true);
     } else {
+        // Take over every checked motor — each motor keeps exactly one
+        // control mode (System commands are exempt).
+        QString taken;
+        for (int i = 0; i < 3; ++i) {
+            if (!m_pvEn[i]->isChecked()) continue;
+            if (m_motorMode[i] != MODE_NONE && m_motorMode[i] != MODE_PV)
+                taken += QString("0x0%1 ").arg(i + 1);
+            m_motorMode[i] = MODE_PV;
+        }
+        if (!taken.isEmpty())
+            logMessage(QString("Pos-Vel takes over motor(s): %1").arg(taken));
+
         int ms = m_spinPvInterval->value();
         m_pvTimer->start(ms);
         m_pvRunning = true;
@@ -658,9 +732,13 @@ void MainWindow::onPvToggle()
         m_btnPvToggle->setText("Stop Sending");
         m_btnPvToggle->setStyleSheet(
             "QPushButton { background: #c62828; color: white; font-weight: bold; }");
-        m_lblPvStatus->setText("Running...");
         m_spinPvInterval->setEnabled(false);
+
+        // Tabs that no longer control any motor stop automatically.
+        if (m_mitRunning && !modeHasMotors(MODE_MIT)) onMitToggle();
+        if (m_cvRunning && !modeHasMotors(MODE_CV)) onCvToggle();
     }
+    refreshModeLabels();
     updateDiagramTiming();
 }
 
@@ -669,7 +747,12 @@ void MainWindow::onPvTick()
     if (!m_connected) return;
 
     for (int i = 0; i < 3; ++i) {
-        if (!m_pvEn[i]->isChecked()) continue;
+        if (!m_pvEn[i]->isChecked()) {
+            // Motor deselected mid-run → release it for other modes.
+            if (m_motorMode[i] == MODE_PV) m_motorMode[i] = MODE_NONE;
+            continue;
+        }
+        if (m_motorMode[i] != MODE_PV) continue;   // taken over by another mode
         uint8_t mid = static_cast<uint8_t>(0x01 + i);
         CanFdFrame f = m_proto.encodePosVel(mid,
             static_cast<float>(m_pvPos[i]->value()),
@@ -677,6 +760,13 @@ void MainWindow::onPvTick()
         m_device->sendFrame(f);
         logRawTx(f, "TX");
     }
+
+    // If every motor was taken over, auto-stop this tab.
+    if (m_pvRunning && !modeHasMotors(MODE_PV)) {
+        onPvToggle();
+        return;
+    }
+    refreshModeLabels();
 }
 
 // ============================================================================
@@ -687,12 +777,26 @@ void MainWindow::onCvToggle()
     if (m_cvRunning) {
         m_cvTimer->stop();
         m_cvRunning = false;
+        // Release motors owned by Const Vel so another mode can take them.
+        for (int i = 0; i < 3; ++i)
+            if (m_motorMode[i] == MODE_CV) m_motorMode[i] = MODE_NONE;
         m_btnCvToggle->setText("Start Sending");
         m_btnCvToggle->setStyleSheet(
             "QPushButton { background: #2e7d32; color: white; font-weight: bold; }");
-        m_lblCvStatus->setText("");
         m_spinCvInterval->setEnabled(true);
     } else {
+        // Take over every checked motor — each motor keeps exactly one
+        // control mode (System commands are exempt).
+        QString taken;
+        for (int i = 0; i < 3; ++i) {
+            if (!m_cvEn[i]->isChecked()) continue;
+            if (m_motorMode[i] != MODE_NONE && m_motorMode[i] != MODE_CV)
+                taken += QString("0x0%1 ").arg(i + 1);
+            m_motorMode[i] = MODE_CV;
+        }
+        if (!taken.isEmpty())
+            logMessage(QString("Const Vel takes over motor(s): %1").arg(taken));
+
         int ms = m_spinCvInterval->value();
         m_cvTimer->start(ms);
         m_cvRunning = true;
@@ -700,9 +804,13 @@ void MainWindow::onCvToggle()
         m_btnCvToggle->setText("Stop Sending");
         m_btnCvToggle->setStyleSheet(
             "QPushButton { background: #c62828; color: white; font-weight: bold; }");
-        m_lblCvStatus->setText("Running...");
         m_spinCvInterval->setEnabled(false);
+
+        // Tabs that no longer control any motor stop automatically.
+        if (m_mitRunning && !modeHasMotors(MODE_MIT)) onMitToggle();
+        if (m_pvRunning && !modeHasMotors(MODE_PV)) onPvToggle();
     }
+    refreshModeLabels();
     updateDiagramTiming();
 }
 
@@ -711,13 +819,25 @@ void MainWindow::onCvTick()
     if (!m_connected) return;
 
     for (int i = 0; i < 3; ++i) {
-        if (!m_cvEn[i]->isChecked()) continue;
+        if (!m_cvEn[i]->isChecked()) {
+            // Motor deselected mid-run → release it for other modes.
+            if (m_motorMode[i] == MODE_CV) m_motorMode[i] = MODE_NONE;
+            continue;
+        }
+        if (m_motorMode[i] != MODE_CV) continue;   // taken over by another mode
         uint8_t mid = static_cast<uint8_t>(0x01 + i);
         CanFdFrame f = m_proto.encodeConstVel(mid,
             static_cast<float>(m_cvVel[i]->value()));
         m_device->sendFrame(f);
         logRawTx(f, "TX");
     }
+
+    // If every motor was taken over, auto-stop this tab.
+    if (m_cvRunning && !modeHasMotors(MODE_CV)) {
+        onCvToggle();
+        return;
+    }
+    refreshModeLabels();
 }
 
 // ============================================================================
@@ -736,6 +856,32 @@ void MainWindow::updateDiagramTiming()
         return;   // no send active — keep current interval
 
     m_plotPanel_->setUpdateInterval(minMs * 10);
+}
+
+// ============================================================================
+// One-control-mode-per-motor helpers
+// ============================================================================
+bool MainWindow::modeHasMotors(int mode) const
+{
+    for (int i = 0; i < 3; ++i)
+        if (m_motorMode[i] == mode) return true;
+    return false;
+}
+
+QString MainWindow::modeMotorList(int mode) const
+{
+    QStringList ids;
+    for (int i = 0; i < 3; ++i)
+        if (m_motorMode[i] == mode)
+            ids << QString("0x0%1").arg(i + 1);
+    return ids.join(" ");
+}
+
+void MainWindow::refreshModeLabels()
+{
+    m_lblMitStatus->setText(m_mitRunning ? "Running: " + modeMotorList(MODE_MIT) : "");
+    m_lblPvStatus->setText(m_pvRunning  ? "Running: " + modeMotorList(MODE_PV)  : "");
+    m_lblCvStatus->setText(m_cvRunning  ? "Running: " + modeMotorList(MODE_CV)  : "");
 }
 
 // ============================================================================
