@@ -19,26 +19,26 @@ if(ZLG_LIB_DIR)
 endif()
 
 include_directories(
-    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
     ${ZLG_INCLUDE_DIR}
 )
 
 set(SOURCES
-    main.cpp
-    mainwindow.cpp
-    canfd_device.cpp
-    ywd_protocol.cpp
-    YwdDiagramWidget.cpp
-    YwdPlotPanel.cpp
+    src/main.cpp
+    src/mainwindow.cpp
+    src/canfd_device.cpp
+    src/ywd_protocol.cpp
+    src/YwdDiagramWidget.cpp
+    src/YwdPlotPanel.cpp
 )
 
 set(HEADERS
-    mainwindow.h
-    canfd_device.h
-    ywd_protocol.h
-    zcan.h
-    YwdDiagramWidget.hpp
-    YwdPlotPanel.hpp
+    include/mainwindow.h
+    include/canfd_device.h
+    include/ywd_protocol.h
+    include/zcan.h
+    include/YwdDiagramWidget.hpp
+    include/YwdPlotPanel.hpp
 )
 
 add_executable(${PROJECT_NAME} ${SOURCES} ${HEADERS})
