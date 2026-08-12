@@ -14,6 +14,7 @@
 #include <QTableWidget>
 #include <QGroupBox>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QSplitter>
 
 #include "canfd_device.h"
@@ -51,7 +52,11 @@ private slots:
     void onRegRead();
     void onRegWrite();
     void onReadAllRegs(uint8_t motor_id);
-    void onBatchReadNext();
+    void onBatchReadNext();          // watchdog: retry/skip on response timeout
+
+    // Batch read helpers (response-driven, per protocol §8)
+    void sendNextRegBlock();
+    void resendCurrentBlock();
 
     // Receive
     void onFrameReceived(const CanFdFrame &frame);
@@ -154,7 +159,12 @@ private:
     uint8_t  m_regRstat[3][256];
 
     int     m_regBatchIdx = 0;
-    int     m_batchMotorIdx = 0;  // which motor the current batch is reading
+    int     m_batchMotorIdx = 0;    // which motor the current batch is reading
+    int     m_batchBlockStart = 0;  // index of first RID in the pending block
+    int     m_batchPendingN = 0;    // # of RIDs in the pending block (≤ 8)
+    int     m_batchRetries = 0;     // response-timeout retries for current block
+    bool    m_batchWaiting = false; // true while a block response is pending
+    QElapsedTimer m_batchElapsed;   // monotonic clock since current block was sent
     QTimer *m_batchReadTimer;
 
     // --- Log ---

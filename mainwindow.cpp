@@ -793,35 +793,32 @@ void MainWindow::onReadAllRegs(uint8_t motor_id)
 
     m_batchMotorIdx = motor_id - 0x01;
     m_regBatchIdx = 0;
+    m_batchWaiting = false;
+    m_batchRetries = 0;
 
     int mi = m_batchMotorIdx;
     m_btnReadAllMotor[mi]->setEnabled(false);
     m_btnReadAllMotor[mi]->setText("Reading...");
     m_lblReadAllMotor[mi]->setText("0 / " + QString::number(m_allRegs.size()));
 
+    // Response-driven batch read: one block request → wait for its response
+    // → send the next block. The timer acts as a watchdog only.
     if (!m_batchReadTimer->isActive())
-        m_batchReadTimer->start(30);
-    onBatchReadNext();
+        m_batchReadTimer->start(50);
+    sendNextRegBlock();
 }
 
-void MainWindow::onBatchReadNext()
+// ============================================================================
+// Send the next block of up to 8 RIDs and wait for its response (§8.1/§8.2).
+// ============================================================================
+void MainWindow::sendNextRegBlock()
 {
-    if (!m_connected) {
-        m_batchReadTimer->stop();
-        m_regBatchIdx = 0;
-        m_batchMotorIdx = 0;
-        for (int mi = 0; mi < 3; ++mi) {
-            m_btnReadAllMotor[mi]->setEnabled(true);
-            m_btnReadAllMotor[mi]->setText("Read All");
-        }
-        return;
-    }
-
-    int mi = m_batchMotorIdx;  // 0,1,2 — current motor being read
+    int mi = m_batchMotorIdx;
 
     if (m_regBatchIdx >= m_allRegs.size()) {
         // All registers read for this motor — done
         m_batchReadTimer->stop();
+        m_batchWaiting = false;
         m_btnReadAllMotor[mi]->setEnabled(true);
         m_btnReadAllMotor[mi]->setText("Read All");
         m_lblReadAllMotor[mi]->setText("Done");
@@ -829,16 +826,80 @@ void MainWindow::onBatchReadNext()
         return;
     }
 
+    m_batchBlockStart = m_regBatchIdx;
     uint8_t mid = static_cast<uint8_t>(0x01 + mi);
     std::vector<uint8_t> rids;
-    for (int i = 0; i < 8 && m_regBatchIdx < m_allRegs.size(); ++i, ++m_regBatchIdx)
+    for (int i = 0; i < 1 && m_regBatchIdx < m_allRegs.size(); ++i, ++m_regBatchIdx)
         rids.push_back(static_cast<uint8_t>(m_allRegs[m_regBatchIdx].addr));
 
     CanFdFrame f = m_proto.encodeRegBlockRead(mid, rids);
     m_device->sendFrame(f);
+    logRawTx(f, "TX");
+
+    m_batchPendingN = static_cast<int>(rids.size());
+    m_batchWaiting  = true;
+    m_batchRetries  = 0;
+    m_batchElapsed.restart();
 
     m_lblReadAllMotor[mi]->setText(
         QString("%1 / %2").arg(m_regBatchIdx).arg(m_allRegs.size()));
+}
+
+// ============================================================================
+// Re-send the block currently awaiting a response (response timeout).
+// ============================================================================
+void MainWindow::resendCurrentBlock()
+{
+    int mi = m_batchMotorIdx;
+    uint8_t mid = static_cast<uint8_t>(0x01 + mi);
+    std::vector<uint8_t> rids;
+    for (int i = 0; i < m_batchPendingN; ++i)
+        rids.push_back(static_cast<uint8_t>(m_allRegs[m_batchBlockStart + i].addr));
+
+    CanFdFrame f = m_proto.encodeRegBlockRead(mid, rids);
+    m_device->sendFrame(f);
+    logRawTx(f, "TX (retry)");
+
+    ++m_batchRetries;
+    m_batchElapsed.restart();
+}
+
+// ============================================================================
+// Watchdog – only acts when a block response is overdue.
+// ============================================================================
+void MainWindow::onBatchReadNext()
+{
+    if (!m_connected) {
+        m_batchReadTimer->stop();
+        m_regBatchIdx = 0;
+        m_batchMotorIdx = 0;
+        m_batchWaiting = false;
+        for (int mi = 0; mi < 3; ++mi) {
+            m_btnReadAllMotor[mi]->setEnabled(true);
+            m_btnReadAllMotor[mi]->setText("Read All");
+        }
+        return;
+    }
+
+    if (!m_batchWaiting) {
+        sendNextRegBlock();
+        return;
+    }
+
+    // Still within the response timeout — keep waiting.
+    if (m_batchElapsed.elapsed() < 200)
+        return;
+
+    if (m_batchRetries < 3) {
+        resendCurrentBlock();          // response lost → retry same block
+    } else {
+        logMessage(
+            QString("Batch read: Motor 0x0%1 block @0x%2 unresponsive, skipping.")
+                .arg(m_batchMotorIdx + 1)
+                .arg(m_allRegs[m_batchBlockStart].addr, 2, 16, QChar('0')));
+        m_batchWaiting = false;
+        sendNextRegBlock();            // skip — m_regBatchIdx already advanced
+    }
 }
 
 // ============================================================================
@@ -878,42 +939,52 @@ void MainWindow::onFrameReceived(const CanFdFrame &frame)
             m_fbValid = true;
         }
     } else if (ft == YwdProtocol::FT_PARAM_RESP) {
-        ParamResponse resp;
-        if (m_proto.decodeParamResponse(frame, resp)) {
-            logMessage(
-                QString("RegResp <- Motor 0x%1 addr=0x%2 val=0x%3 %4")
-                    .arg(frame.id & 0x7F, 2, 16, QChar('0'))
-                    .arg(resp.addr, 2, 16, QChar('0'))
-                    .arg(resp.value, 8, 16, QChar('0'))
-                    .arg(resp.success ? "" : "FAIL"));
-
-            m_proto.applyRegScaling(resp.addr, resp.value);
-
-            if (!resp.is_write) {
-                updateRegTableValue(frame.id & 0x7F, resp.addr, resp.rstat, resp.value);
-                m_lblRegResult->setText(
-                    QString("0x%1 = 0x%2")
-                        .arg(resp.addr, 2, 16, QChar('0'))
-                        .arg(resp.value, 8, 16, QChar('0')));
-                m_lblRegResult->setStyleSheet("color: green; font-family: monospace;");
-                m_editRegValue->setText("0x" + hexStr(resp.value, 8));
-            } else {
-                m_lblRegResult->setText("Write OK");
-                m_lblRegResult->setStyleSheet("color: green; font-family: monospace;");
-            }
-        }
+        // Distinguish by B1 (N): single-register response (N ≤ 1, from the
+        // register tab) vs block response (N > 1, from batch read, §8.2).
+        const uint8_t n = (frame.len >= 2) ? frame.data[1] : 0;
 
         std::vector<ParamResponse> vec;
         if (m_proto.decodeRegBlockResponse(frame, vec)) {
+            const uint8_t mid = frame.id & 0x7F;
             for (auto &r : vec) {
                 logMessage(
                     QString("RegBlk <- Motor 0x%1 addr=0x%2 val=0x%3 %4")
-                        .arg(frame.id & 0x7F, 2, 16, QChar('0'))
+                        .arg(mid, 2, 16, QChar('0'))
                         .arg(r.addr, 2, 16, QChar('0'))
                         .arg(r.value, 8, 16, QChar('0'))
                         .arg(r.success ? "" : "FAIL"));
                 m_proto.applyRegScaling(r.addr, r.value);
-                updateRegTableValue(frame.id & 0x7F, r.addr, r.rstat, r.value);
+            
+
+                if (!r.is_write) {
+                    updateRegTableValue(frame.id & 0x7F, r.addr, r.rstat, r.value);
+                    m_lblRegResult->setText(
+                        QString("0x%1 = 0x%2")
+                            .arg(r.addr, 2, 16, QChar('0'))
+                            .arg(r.value, 8, 16, QChar('0')));
+                    m_lblRegResult->setStyleSheet("color: green; font-family: monospace;");
+                    m_editRegValue->setText("0x" + hexStr(r.value, 8));
+
+                    if (m_batchWaiting
+                        && mid == static_cast<uint8_t>(m_batchMotorIdx + 1)
+                        && static_cast<int>(vec.size()) == m_batchPendingN) {
+                        bool match = true;
+                        for (int i = 0; i < m_batchPendingN; ++i) {
+                            if (vec[i].addr != m_allRegs[m_batchBlockStart + i].addr) {
+                                match = false;
+                                break;
+                            }
+                        }
+                        if (match) {
+                            m_batchWaiting = false;
+                            m_batchRetries = 0;
+                            sendNextRegBlock();
+                        }
+                    }
+                } else {
+                    m_lblRegResult->setText("Write OK");
+                    m_lblRegResult->setStyleSheet("color: green; font-family: monospace;");
+                }
             }
         }
     }

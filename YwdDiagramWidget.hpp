@@ -101,10 +101,8 @@ private:
     void buildUi();
     void ensureSeries(uint8_t motorId);
     void dropSeries(uint8_t motorId);
-    void rebuildMotorCheckboxes();
     void updateTitle();
     void onMotorToggled();
-    void onGlobalToggled(bool checked);
 
     QColor colorForMotor(uint8_t id) const;
 
