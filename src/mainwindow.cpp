@@ -214,13 +214,17 @@ void MainWindow::setupUi()
 
         QHBoxLayout *row2 = new QHBoxLayout();
         row2->addWidget(new QLabel("Value:"));
-        m_editRegValue = new QLineEdit("0x00000000");
+        m_editRegValue = new QLineEdit("0.0000");
         m_editRegValue->setFont(QFont("monospace", 10));
-        m_editRegValue->setMaxLength(10);
-        m_editRegValue->setMinimumWidth(100);
+        m_editRegValue->setMaxLength(16);
+        m_editRegValue->setMinimumWidth(120);
         m_editRegValue->setValidator(new QRegularExpressionValidator(
-            QRegularExpression("0[xX][0-9a-fA-F]{0,8}"), m_editRegValue));
-        m_editRegValue->setToolTip("32-bit hex value, e.g. 0x42B40000");
+            QRegularExpression("[+-]?[0-9]*\\.?[0-9]*([eE][+-]?[0-9]+)?"),
+            m_editRegValue));
+        m_editRegValue->setToolTip(
+            "Decimal value matching the register data type:\n"
+            "float32 → float (e.g. 12.5)\n"
+            "uint32 / int32 → integer (e.g. 42)");
         connect(m_editRegValue, &QLineEdit::returnPressed, this, &MainWindow::onRegWrite);
         row2->addWidget(m_editRegValue, 1);
         m_btnRegRead  = new QPushButton("Read");
@@ -917,19 +921,79 @@ void MainWindow::onRegWrite()
 {
     if (!m_connected) return;
 
-    bool ok = false;
-    uint32_t value = m_editRegValue->text().trimmed().toUInt(&ok, 16);
-    if (!ok) {
-        m_lblRegResult->setText("Invalid hex value: " + m_editRegValue->text());
+    uint8_t  mid  = static_cast<uint8_t>(m_regMotorId->value());
+    uint16_t addr = static_cast<uint16_t>(m_spinRegAddr->value());
+
+    uint32_t value = 0;
+    QString  err;
+    if (!parseRegValue(static_cast<uint8_t>(addr), m_editRegValue->text(), value, err)) {
+        m_lblRegResult->setText("Invalid value: " + err);
         m_lblRegResult->setStyleSheet("color: red; font-family: monospace;");
         return;
     }
 
-    uint8_t  mid  = static_cast<uint8_t>(m_regMotorId->value());
-    uint16_t addr = static_cast<uint16_t>(m_spinRegAddr->value());
     CanFdFrame f = m_proto.encodeRegWrite(mid, addr, value);
     m_device->sendFrame(f);
     logRawTx(f, "TX");
+}
+
+// ============================================================================
+// Typed register value helpers — format/parse per RegInfo::data_type.
+// float32 → IEEE-754 float, uint32/int32 → decimal integer. No hex input.
+// ============================================================================
+QString MainWindow::formatRegValue(uint8_t addr, uint32_t value) const
+{
+    QString type;
+    for (const auto &reg : m_allRegs)
+        if (reg.addr == addr) { type = reg.data_type; break; }
+
+    if (type == QStringLiteral("float32")) {
+        float f;
+        memcpy(&f, &value, sizeof(f));
+        if (std::isfinite(f))
+            return QString::number(f, 'f', 4);
+        return QString("0x%1").arg(value, 8, 16, QChar('0')).toUpper();
+    }
+    if (type == QStringLiteral("int32"))
+        return QString::number(static_cast<int32_t>(value));
+    return QString::number(value);   // uint32 (default)
+}
+
+bool MainWindow::parseRegValue(uint8_t addr, const QString &text,
+                               uint32_t &value, QString &err) const
+{
+    QString type;
+    for (const auto &reg : m_allRegs)
+        if (reg.addr == addr) { type = reg.data_type; break; }
+
+    const QString s = text.trimmed();
+    if (s.isEmpty()) { err = "empty value"; return false; }
+
+    if (type == QStringLiteral("float32")) {
+        bool ok = false;
+        const float f = s.toFloat(&ok);
+        if (!ok) { err = "not a number: '" + text + "'"; return false; }
+        memcpy(&value, &f, sizeof(f));
+        return true;
+    }
+
+    bool ok = false;
+    const qlonglong v = s.toLongLong(&ok);
+    if (!ok) { err = "not an integer: '" + text + "'"; return false; }
+    if (type == QStringLiteral("int32")) {
+        if (v < INT32_MIN || v > INT32_MAX) {
+            err = "out of int32 range (-2147483648..2147483647)";
+            return false;
+        }
+        value = static_cast<uint32_t>(static_cast<int32_t>(v));
+    } else {
+        if (v < 0 || v > static_cast<qlonglong>(UINT32_MAX)) {
+            err = "out of uint32 range (0..4294967295)";
+            return false;
+        }
+        value = static_cast<uint32_t>(v);
+    }
+    return true;
 }
 
 void MainWindow::onReadAllRegs(uint8_t motor_id)
@@ -1105,11 +1169,11 @@ void MainWindow::onFrameReceived(const CanFdFrame &frame)
                 if (!r.is_write) {
                     updateRegTableValue(frame.id & 0x7F, r.addr, r.rstat, r.value);
                     m_lblRegResult->setText(
-                        QString("0x%1 = 0x%2")
+                        QString("0x%1 = %2")
                             .arg(r.addr, 2, 16, QChar('0'))
-                            .arg(r.value, 8, 16, QChar('0')));
+                            .arg(formatRegValue(r.addr, r.value)));
                     m_lblRegResult->setStyleSheet("color: green; font-family: monospace;");
-                    m_editRegValue->setText("0x" + hexStr(r.value, 8));
+                    m_editRegValue->setText(formatRegValue(r.addr, r.value));
 
                     if (m_batchWaiting
                         && mid == static_cast<uint8_t>(m_batchMotorIdx + 1)
@@ -1213,24 +1277,8 @@ void MainWindow::updateRegTableValue(uint8_t motor_id, uint8_t addr, uint8_t rst
     else
         rstatStr = QString("0x%1").arg(rstat, 2, 16, QChar('0'));
 
-    // Determine decoded value string from the register catalogue
-    QString decoded;
-    for (const auto &reg : m_allRegs) {
-        if (reg.addr != addr) continue;
-        if (reg.data_type == QStringLiteral("float32")) {
-            float f;
-            memcpy(&f, &value, sizeof(f));
-            if (std::isfinite(f))
-                decoded = QString::number(f, 'f', 4);
-            else
-                decoded = QString("0x%1").arg(value, 8, 16, QChar('0')).toUpper();
-        } else {
-            decoded = QString::number(value);
-        }
-        break;
-    }
-    if (decoded.isEmpty())
-        decoded = QString("0x%1").arg(value, 8, 16, QChar('0')).toUpper();
+    // Determine decoded value string from the register catalogue (typed)
+    const QString decoded = formatRegValue(addr, value);
 
     // Columns: 0=Addr  1=Name  2=Value  3=RSTAT
     static const int colVal   = 2;

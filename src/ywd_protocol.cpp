@@ -137,6 +137,10 @@ CanFdFrame YwdProtocol::encodeConstVel(uint8_t motor_id, float vel_des)
     int16_t v = (int16_t)std::round(vel_des / m_vmax * 32767.0f);
     f.data[0] =  v        & 0xFF;
     f.data[1] = (v >> 8)  & 0xFF;
+    f.data[2] = 0x01;
+    f.data[3] = 0x00;
+    f.data[4] = 0x01;
+    f.data[5] = 0x00;
     // B2-B5: ACC/DEC = 0 (use register defaults)
 
     return f;

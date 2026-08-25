@@ -96,6 +96,11 @@ private:
     QString modeMotorList(int mode) const;
     void    refreshModeLabels();
 
+    // Typed register value helpers — type from RegInfo::data_type
+    QString formatRegValue(uint8_t addr, uint32_t value) const;
+    bool    parseRegValue(uint8_t addr, const QString &text,
+                          uint32_t &value, QString &err) const;
+
     // Helper: create a standard double spinbox
     static QDoubleSpinBox *makeDblSpin(double min, double max, int decimals, double val);
 
