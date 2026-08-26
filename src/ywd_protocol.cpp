@@ -93,7 +93,8 @@ CanFdFrame YwdProtocol::encodeMitCtrl(uint8_t motor_id,
 // B6-B7: ACC    uint16 LE (LSB=1 rad/s², 0=use default)
 // B8-B9: DEC    uint16 LE (LSB=1 rad/s², 0=use default)
 CanFdFrame YwdProtocol::encodePosVel(uint8_t motor_id,
-                                     float pos_des, float vel_limit)
+                                     float pos_des, float vel_limit,
+                                     float acc, float dec)
 {
     CanFdFrame f{};
     f.id        = buildCmdId(CMD_POS_VEL_CTRL, motor_id);
@@ -110,11 +111,18 @@ CanFdFrame YwdProtocol::encodePosVel(uint8_t motor_id,
     f.data[2] = (p >> 16) & 0xFF;
     f.data[3] = (p >> 24) & 0xFF;
 
-    // Vmax  uint16 LE  (use default ACC/DEC = 0)
+    // Vmax  uint16 LE
     uint16_t v = (uint16_t)std::round(vel_limit / m_vmax * 65535.0f);
     f.data[4] =  v        & 0xFF;
     f.data[5] = (v >> 8)  & 0xFF;
-    // B6-B9: ACC/DEC = 0 (use register defaults)
+
+    // ACC/DEC  uint16 LE, LSB=1 rad/s², 0=use register default
+    uint16_t a = (uint16_t)std::round(std::max(0.0f, std::min(acc, 65535.0f)));
+    uint16_t d = (uint16_t)std::round(std::max(0.0f, std::min(dec, 65535.0f)));
+    f.data[6] =  a        & 0xFF;
+    f.data[7] = (a >> 8)  & 0xFF;
+    f.data[8] =  d        & 0xFF;
+    f.data[9] = (d >> 8)  & 0xFF;
 
     return f;
 }
@@ -123,7 +131,8 @@ CanFdFrame YwdProtocol::encodePosVel(uint8_t motor_id,
 // B0-B1: V_des  int16 LE (round(vel / VMAX * 32767))
 // B2-B3: ACC    uint16 LE (LSB=1 rad/s², 0=use default)
 // B4-B5: DEC    uint16 LE (LSB=1 rad/s², 0=use default)
-CanFdFrame YwdProtocol::encodeConstVel(uint8_t motor_id, float vel_des)
+CanFdFrame YwdProtocol::encodeConstVel(uint8_t motor_id, float vel_des,
+                                       float acc, float dec)
 {
     CanFdFrame f{};
     f.id        = buildCmdId(CMD_CONST_VEL, motor_id);
@@ -137,12 +146,138 @@ CanFdFrame YwdProtocol::encodeConstVel(uint8_t motor_id, float vel_des)
     int16_t v = (int16_t)std::round(vel_des / m_vmax * 32767.0f);
     f.data[0] =  v        & 0xFF;
     f.data[1] = (v >> 8)  & 0xFF;
-    f.data[2] = 0x01;
-    f.data[3] = 0x00;
-    f.data[4] = 0x01;
-    f.data[5] = 0x00;
-    // B2-B5: ACC/DEC = 0 (use register defaults)
 
+    // ACC/DEC  uint16 LE, LSB=1 rad/s², 0=use register default
+    uint16_t a = (uint16_t)std::round(std::max(0.0f, std::min(acc, 65535.0f)));
+    uint16_t d = (uint16_t)std::round(std::max(0.0f, std::min(dec, 65535.0f)));
+    f.data[2] =  a        & 0xFF;
+    f.data[3] = (a >> 8)  & 0xFF;
+    f.data[4] =  d        & 0xFF;
+    f.data[5] = (d >> 8)  & 0xFF;
+
+    return f;
+}
+
+// ============================================================================
+// Aggregated multi-motor control frames (YWD_CANFD_聚合帧协议_V0.1.md §4)
+//   B0 = Header (bit0..2 = rec_cnt)  +  N × [NODE_ID(1B) + Body]
+//   MIT Body (12B): p_des i32 | v_des i16 | kp u16(0.01) | kd u16(0.001) | tff i16
+//   PV  Body (10B): p_des i32 | vmax u16(vel/VMAX*65535) | acc u16(LSB=1) | dec u16(LSB=1)
+//   CV  Body (6B):  v_des i16 | acc u16(LSB=1) | dec u16(LSB=1)
+// ============================================================================
+CanFdFrame YwdProtocol::encodeAggMit(const std::vector<AggMitRecord> &recs)
+{
+    CanFdFrame f{};
+    f.id        = 0x001;   // aggregate MIT control
+    f.is_ext_id = false;
+    f.is_fd     = true;
+    f.brs       = false;
+
+    memset(f.data, 0, sizeof(f.data));
+
+    const int n = std::min(static_cast<int>(recs.size()), 4);
+    f.data[0] = static_cast<uint8_t>(n & 0x07);   // Header: rec_cnt
+
+    int off = 1;
+    for (int i = 0; i < n; ++i) {
+        const auto &r = recs[i];
+        f.data[off++] = r.motor_id & 0x7F;                    // NODE_ID
+
+        int32_t p = (int32_t)std::round(r.pos_des / m_pmax * 2147483647.0f);
+        f.data[off++] =  p        & 0xFF;
+        f.data[off++] = (p >> 8)  & 0xFF;
+        f.data[off++] = (p >> 16) & 0xFF;
+        f.data[off++] = (p >> 24) & 0xFF;
+
+        int16_t v = (int16_t)std::round(r.vel_des / m_vmax * 32767.0f);
+        f.data[off++] =  v        & 0xFF;
+        f.data[off++] = (v >> 8)  & 0xFF;
+
+        uint16_t kp = (uint16_t)std::round(r.kp / 0.01f);
+        f.data[off++] =  kp       & 0xFF;
+        f.data[off++] = (kp >> 8) & 0xFF;
+
+        uint16_t kd = (uint16_t)std::round(r.kd / 0.001f);   // LSB=0.001
+        f.data[off++] =  kd       & 0xFF;
+        f.data[off++] = (kd >> 8) & 0xFF;
+
+        int16_t tff = (int16_t)std::round(r.ff_torque / m_tmax * 32767.0f);
+        f.data[off++] =  tff      & 0xFF;
+        f.data[off++] = (tff >> 8) & 0xFF;
+    }
+    f.len = padToValidDlc(static_cast<uint8_t>(off));
+    return f;
+}
+
+CanFdFrame YwdProtocol::encodeAggPosVel(const std::vector<AggPosVelRecord> &recs)
+{
+    CanFdFrame f{};
+    f.id        = 0x002;   // aggregate Pos-Vel control
+    f.is_ext_id = false;
+    f.is_fd     = true;
+    f.brs       = false;
+
+    memset(f.data, 0, sizeof(f.data));
+
+    const int n = std::min(static_cast<int>(recs.size()), 4);
+    f.data[0] = static_cast<uint8_t>(n & 0x07);   // Header: rec_cnt
+
+    int off = 1;
+    for (int i = 0; i < n; ++i) {
+        const auto &r = recs[i];
+        f.data[off++] = r.motor_id & 0x7F;                    // NODE_ID
+
+        int32_t p = (int32_t)std::round(r.pos_des / m_pmax * 2147483647.0f);
+        f.data[off++] =  p        & 0xFF;
+        f.data[off++] = (p >> 8)  & 0xFF;
+        f.data[off++] = (p >> 16) & 0xFF;
+        f.data[off++] = (p >> 24) & 0xFF;
+
+        // vmax normalized vel/VMAX*65535 (same as single frame); acc/dec LSB=1 rad/s²
+        uint16_t vm  = (uint16_t)std::round(r.vel_limit / m_vmax * 65535.0f);
+        uint16_t acc = (uint16_t)std::round(std::max(0.0f, std::min(r.acc, 65535.0f)));
+        uint16_t dec = (uint16_t)std::round(std::max(0.0f, std::min(r.dec, 65535.0f)));
+        f.data[off++] =  vm       & 0xFF;
+        f.data[off++] = (vm >> 8) & 0xFF;
+        f.data[off++] =  acc      & 0xFF;
+        f.data[off++] = (acc >> 8) & 0xFF;
+        f.data[off++] =  dec      & 0xFF;
+        f.data[off++] = (dec >> 8) & 0xFF;
+    }
+    f.len = padToValidDlc(static_cast<uint8_t>(off));
+    return f;
+}
+
+CanFdFrame YwdProtocol::encodeAggConstVel(const std::vector<AggConstVelRecord> &recs)
+{
+    CanFdFrame f{};
+    f.id        = 0x003;   // aggregate Const-Vel control
+    f.is_ext_id = false;
+    f.is_fd     = true;
+    f.brs       = false;
+
+    memset(f.data, 0, sizeof(f.data));
+
+    const int n = std::min(static_cast<int>(recs.size()), 4);
+    f.data[0] = static_cast<uint8_t>(n & 0x07);   // Header: rec_cnt
+
+    int off = 1;
+    for (int i = 0; i < n; ++i) {
+        const auto &r = recs[i];
+        f.data[off++] = r.motor_id & 0x7F;                    // NODE_ID
+
+        int16_t v = (int16_t)std::round(r.vel_des / m_vmax * 32767.0f);
+        f.data[off++] =  v        & 0xFF;
+        f.data[off++] = (v >> 8)  & 0xFF;
+        // acc / dec LSB=1 rad/s²
+        uint16_t acc = (uint16_t)std::round(std::max(0.0f, std::min(r.acc, 65535.0f)));
+        uint16_t dec = (uint16_t)std::round(std::max(0.0f, std::min(r.dec, 65535.0f)));
+        f.data[off++] =  acc      & 0xFF;
+        f.data[off++] = (acc >> 8) & 0xFF;
+        f.data[off++] =  dec      & 0xFF;
+        f.data[off++] = (dec >> 8) & 0xFF;
+    }
+    f.len = padToValidDlc(static_cast<uint8_t>(off));
     return f;
 }
 

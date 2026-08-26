@@ -161,12 +161,44 @@ public:
                              float pos_des, float vel_des,
                              float kp, float kd, float ff_torque);
 
-    // Position-Velocity control
+    // Position-Velocity control (acc/dec: rad/s², 0 = use register default)
     CanFdFrame encodePosVel(uint8_t motor_id,
-                            float pos_des, float vel_limit);
+                            float pos_des, float vel_limit,
+                            float acc = 0.0f, float dec = 0.0f);
 
-    // Constant velocity control
-    CanFdFrame encodeConstVel(uint8_t motor_id, float vel_des);
+    // Constant velocity control (acc/dec: rad/s², 0 = use register default)
+    CanFdFrame encodeConstVel(uint8_t motor_id, float vel_des,
+                              float acc = 0.0f, float dec = 0.0f);
+
+    // -- Aggregated multi-motor control frames (YWD_CANFD_聚合帧协议_V0.1.md §4) --
+    // One frame carries up to 4 motors:
+    //   B0 = Header (bit0..2 = rec_cnt)  +  N × [NODE_ID(1B) + Body]
+    //   MIT ID=0x001 (Body 12B), PosVel ID=0x002 (Body 10B), ConstVel ID=0x003 (Body 6B)
+    struct AggMitRecord {
+        uint8_t motor_id;    // node id carried inside the frame (0x01..0x03)
+        float   pos_des;     // rad
+        float   vel_des;     // rad/s
+        float   kp;          // N·m/rad   (0.01/LSB)
+        float   kd;          // N·m·s/rad (0.01/LSB per agg doc)
+        float   ff_torque;   // N·m
+    };
+    struct AggPosVelRecord {
+        uint8_t motor_id;
+        float   pos_des;     // rad
+        float   vel_limit;   // rad/s, normalized vel/VMAX*65535 (same as single frame)
+        float   acc;         // rad/s², LSB=1
+        float   dec;         // rad/s², LSB=1
+    };
+    struct AggConstVelRecord {
+        uint8_t motor_id;
+        float   vel_des;     // rad/s
+        float   acc;         // rad/s², LSB=1
+        float   dec;         // rad/s², LSB=1
+    };
+
+    CanFdFrame encodeAggMit(const std::vector<AggMitRecord> &recs);
+    CanFdFrame encodeAggPosVel(const std::vector<AggPosVelRecord> &recs);
+    CanFdFrame encodeAggConstVel(const std::vector<AggConstVelRecord> &recs);
 
     // System command
     CanFdFrame encodeSystemCmd(uint8_t motor_id,

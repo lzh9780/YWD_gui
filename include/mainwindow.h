@@ -84,9 +84,9 @@ private:
     // Stop all per-tab periodic send timers
     void stopAllTimers();
 
-    // Helper: horizontal row of "Label | [s0] [s1] [s2]"
-    QWidget *makeSpinRow(const QString &label,
-                         QDoubleSpinBox *s0, QDoubleSpinBox *s1, QDoubleSpinBox *s2);
+    // Helper: horizontal row of "Label | [e0] [e1] [e2]" (one column per motor)
+    QWidget *makeLineRow(const QString &label,
+                         QLineEdit *e0, QLineEdit *e1, QLineEdit *e2);
 
     // Helper: derive diagram update interval from the active send timers
     void updateDiagramTiming();
@@ -101,8 +101,15 @@ private:
     bool    parseRegValue(uint8_t addr, const QString &text,
                           uint32_t &value, QString &err) const;
 
-    // Helper: create a standard double spinbox
-    static QDoubleSpinBox *makeDblSpin(double min, double max, int decimals, double val);
+    // Helper: create a standard decimal line edit for a send parameter
+    static QLineEdit *makeLineEdit(const QString &def = "0", int width = 78);
+
+    // Parse a send-parameter line edit; returns false on empty/invalid text
+    static bool   parseLineEdit(QLineEdit *le, double &out);
+    // Same, but fall back to `fallback` when the text is empty/invalid
+    static double lineEditValue(QLineEdit *le, double fallback);
+    // Validate the n line edits of a motor; warn and return false if any is invalid
+    bool validateSendInputs(QLineEdit *const edits[], int n, int motorIdx) const;
 
     static QString hexStr(uint32_t val, int digits);
 
@@ -117,28 +124,31 @@ private:
     QTabWidget  *m_cmdTabs;
 
     // MIT tab — 3 motors: {0x01, 0x02, 0x03}
-    QCheckBox      *m_mitEn[3];
-    QDoubleSpinBox *m_mitPos[3], *m_mitVel[3], *m_mitKp[3], *m_mitKd[3], *m_mitTff[3];
+    QCheckBox *m_mitEn[3];
+    QLineEdit *m_mitPos[3], *m_mitVel[3], *m_mitKp[3], *m_mitKd[3], *m_mitTff[3];
     QPushButton    *m_btnMitToggle;
     QSpinBox       *m_spinMitInterval;
+    QCheckBox      *m_mitSync = nullptr;   // replicate motor 1 data to all
     QLabel         *m_lblMitStatus;
     QTimer         *m_mitTimer;
     bool            m_mitRunning = false;
 
     // Pos-Vel tab — 3 motors
-    QCheckBox      *m_pvEn[3];
-    QDoubleSpinBox *m_pvPos[3], *m_pvVelLim[3];
+    QCheckBox *m_pvEn[3];
+    QLineEdit *m_pvPos[3], *m_pvVelLim[3], *m_pvAcc[3], *m_pvDec[3];
     QPushButton    *m_btnPvToggle;
     QSpinBox       *m_spinPvInterval;
+    QCheckBox      *m_pvSync = nullptr;    // replicate motor 1 data to all
     QLabel         *m_lblPvStatus;
     QTimer         *m_pvTimer;
     bool            m_pvRunning = false;
 
     // Const Vel tab — 3 motors
-    QCheckBox      *m_cvEn[3];
-    QDoubleSpinBox *m_cvVel[3];
+    QCheckBox *m_cvEn[3];
+    QLineEdit *m_cvVel[3], *m_cvAcc[3], *m_cvDec[3];
     QPushButton    *m_btnCvToggle;
     QSpinBox       *m_spinCvInterval;
+    QCheckBox      *m_cvSync = nullptr;    // replicate motor 1 data to all
     QLabel         *m_lblCvStatus;
     QTimer         *m_cvTimer;
     bool            m_cvRunning = false;
