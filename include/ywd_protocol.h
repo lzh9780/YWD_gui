@@ -26,6 +26,12 @@
 #define FRAME_AGG_CTRL2         0x002
 #define FRAME_AGG_CTRL3         0x003
 
+// Aggregation feedback frames (D → H, §5.4):
+// one frame carries N motor records, NODE_ID is inside each record
+#define FRAME_AGG_FB_MIT        0x701
+#define FRAME_AGG_FB_POSVEL     0x702
+#define FRAME_AGG_FB_CVEL       0x703
+
 // ============================================================================
 // System command codes (CMD_SYSTEM frame, data[0])
 // ============================================================================
@@ -179,7 +185,7 @@ public:
         float   pos_des;     // rad
         float   vel_des;     // rad/s
         float   kp;          // N·m/rad   (0.01/LSB)
-        float   kd;          // N·m·s/rad (0.01/LSB per agg doc)
+        float   kd;          // N·m·s/rad (0.001/LSB)
         float   ff_torque;   // N·m
     };
     struct AggPosVelRecord {
@@ -221,6 +227,14 @@ public:
     bool decodeFeedback(const CanFdFrame &frame, FeedbackFrame &fb);
     bool decodeParamResponse(const CanFdFrame &frame, ParamResponse &resp);
 
+    // Decode an aggregate feedback frame (0x701/0x702/0x703, §5.2):
+    //   B0 = Header (bit0..2 = rec_cnt N)
+    //   then N × [ NODE_ID(1B) + YwdFeedback_t(16B) ]
+    //   (+ optional trailing 6B CRC stats, tolerated)
+    // Returns one FeedbackFrame per record; `out` is cleared on entry.
+    bool decodeAggFeedback(const CanFdFrame &frame,
+                           std::vector<FeedbackFrame> &out);
+
     // Decode a block register response (C: B0=CMD, B1=N, then RID+RSTAT+val)
     bool decodeRegBlockResponse(const CanFdFrame &frame,
                                 std::vector<ParamResponse> &results);
@@ -237,7 +251,10 @@ public:
         FT_PARAM_RESP,
         FT_AGG_CTRL1,
         FT_AGG_CTRL2,
-        FT_AGG_CTRL3
+        FT_AGG_CTRL3,
+        FT_AGG_FB_MIT,
+        FT_AGG_FB_POSVEL,
+        FT_AGG_FB_CVEL
     };
 
     static FrameType classifyFrame(uint32_t canId);

@@ -1336,7 +1336,10 @@ void MainWindow::onFrameReceived(const CanFdFrame &frame)
 {
     ++m_rxCount;
     YwdProtocol::FrameType ft = YwdProtocol::classifyFrame(frame.id);
-    if (ft != YwdProtocol::FT_FEEDBACK)
+    if (ft != YwdProtocol::FT_FEEDBACK
+        && ft != YwdProtocol::FT_AGG_FB_MIT
+        && ft != YwdProtocol::FT_AGG_FB_POSVEL
+        && ft != YwdProtocol::FT_AGG_FB_CVEL)
         logRawTx(frame, "RX");
 
     if (ft == YwdProtocol::FT_FEEDBACK) {
@@ -1347,6 +1350,22 @@ void MainWindow::onFrameReceived(const CanFdFrame &frame)
             updateFeedbackTable(fb);
             m_plotPanel_->pushFeedback(fb);
             m_fbValid = true;
+        }
+    } else if (ft == YwdProtocol::FT_AGG_FB_MIT
+               || ft == YwdProtocol::FT_AGG_FB_POSVEL
+               || ft == YwdProtocol::FT_AGG_FB_CVEL) {
+        // Aggregate feedback (0x701/0x702/0x703, §5): one frame carries
+        // records for all controlled motors. Feed each into the same
+        // feedback table / plot pipeline as single-motor 0x600|node frames.
+        ++m_fbCount;
+        std::vector<FeedbackFrame> vec;
+        if (m_proto.decodeAggFeedback(frame, vec)) {
+            for (const auto &fb : vec) {
+                m_lastFeedback[fb.motor_id] = fb;
+                updateFeedbackTable(fb);
+                m_plotPanel_->pushFeedback(fb);
+                m_fbValid = true;
+            }
         }
     } else if (ft == YwdProtocol::FT_PARAM_RESP) {
         // Distinguish by B1 (N): single-register response (N ≤ 1, from the

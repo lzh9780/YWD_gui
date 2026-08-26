@@ -392,6 +392,76 @@ bool YwdProtocol::decodeFeedback(const CanFdFrame &frame, FeedbackFrame &fb)
     return true;
 }
 
+// Aggregate feedback decode (§5.2). A single frame carries N motor records:
+//   B0 = Header (bit0..2 = rec_cnt)
+//   then N × [ NODE_ID(1B) + YwdFeedback_t(16B) ]
+//   (+ optional trailing 6B CRC stats in newer firmware)
+// The 16B record body uses the exact same field layout as the 0x600|node
+// feedback body (offsets below are record-relative, i.e. single-frame +1).
+bool YwdProtocol::decodeAggFeedback(const CanFdFrame &frame,
+                                    std::vector<FeedbackFrame> &out)
+{
+    switch (frame.id) {
+        case FRAME_AGG_FB_MIT:
+        case FRAME_AGG_FB_POSVEL:
+        case FRAME_AGG_FB_CVEL:
+            break;
+        default:
+            return false;
+    }
+    if (frame.len < 1) return false;
+
+    const uint8_t *d = frame.data;
+    const int n = d[0] & 0x07;                    // rec_cnt (bit0..2), 1..4
+    if (n < 1 || n > 4) return false;
+
+    // 1 + N*17 bytes of records; newer firmware appends 6B CRC stats
+    if (frame.len < 1 + n * 17) return false;
+
+    out.clear();
+    out.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const int off = 1 + i * 17;
+        FeedbackFrame fb{};
+        fb.motor_id = d[off + 0];                 // NODE_ID inside the record
+
+        // +1: STATE[7:4] | MODE[3:0]
+        fb.state = (d[off + 1] >> 4) & 0x0F;
+        fb.mode  = d[off + 1] & 0x0F;
+
+        // +2: FAULT
+        fb.fault = d[off + 2];
+
+        // +3..+6: POS int32 LE
+        int32_t pos_raw = d[off+3] | (d[off+4] << 8) | (d[off+5] << 16) | (d[off+6] << 24);
+        fb.position = (float)pos_raw / 2147483647.0f * m_pmax;
+
+        // +7..+8: VEL int16 LE
+        int16_t vel_raw = (int16_t)(d[off+7] | (d[off+8] << 8));
+        fb.velocity = (float)vel_raw / 32767.0f * m_vmax;
+
+        // +9..+10: TORQUE int16 LE
+        int16_t trq_raw = (int16_t)(d[off+9] | (d[off+10] << 8));
+        fb.torque = (float)trq_raw / 32767.0f * m_tmax;
+
+        // +11: T_MOS int8 ℃
+        fb.temp_mos = (int8_t)d[off+11];
+
+        // +12: T_ROTOR int8 ℃
+        fb.temp_motor = (int8_t)d[off+12];
+
+        // +13..+14: VBUS int16 LE, LSB=0.01V
+        int16_t vbus_raw = (int16_t)(d[off+13] | (d[off+14] << 8));
+        fb.voltage = (float)vbus_raw * 0.01f;
+
+        // +15: SEQ
+        fb.seq = d[off+15];
+
+        out.push_back(fb);
+    }
+    return true;
+}
+
 // Single-register response decode (same block format, §8.2, N typically = 1)
 // Response layout: B0=CMD  B1=N  B2=RID  B3=RSTAT  B4-B7=value(LE)
 bool YwdProtocol::decodeParamResponse(const CanFdFrame &frame,
@@ -425,6 +495,9 @@ YwdProtocol::FrameType YwdProtocol::classifyFrame(uint32_t canId)
         case FRAME_AGG_CTRL1:    return FT_AGG_CTRL1;
         case FRAME_AGG_CTRL2:    return FT_AGG_CTRL2;
         case FRAME_AGG_CTRL3:    return FT_AGG_CTRL3;
+        case FRAME_AGG_FB_MIT:   return FT_AGG_FB_MIT;
+        case FRAME_AGG_FB_POSVEL: return FT_AGG_FB_POSVEL;
+        case FRAME_AGG_FB_CVEL:  return FT_AGG_FB_CVEL;
         default:                 break;
     }
 
