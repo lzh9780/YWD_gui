@@ -292,7 +292,7 @@ void MainWindow::setupUi()
             m_regTables[mi]->setSelectionBehavior(QAbstractItemView::SelectRows);
             m_regTables[mi]->setEditTriggers(QAbstractItemView::NoEditTriggers);
             m_regTables[mi]->verticalHeader()->setVisible(false);
-            m_regTables[mi]->setMaximumHeight(130);
+            // m_regTables[mi]->setMaximumHeight(300);
             m_regTables[mi]->horizontalHeader()->setStretchLastSection(true);
             pl->addWidget(m_regTables[mi]);
 
