@@ -96,16 +96,20 @@ sudo ./build/YWD_Motor_Control        # USB access to the adapter usually needs 
 3. **Connect.** Press **Connect**. The light turns green, the label reads
    `Connected`, the log shows `Device opened successfully.` and the status
    bar shows `RX: 0 | Feedback: 0.0 Hz`.
+   ![connect](./images/connect.png)
 4. **Read the motor parameters.** Open the register page `Motor 0x01` and
    press **Read All** (§8.2). This loads `PMAX`/`VMAX`/`TMAX` so the control
    scaling of the mode tabs is correct.
+   ![read\_motor\_param](./images/read_motor_param.png)
 5. **Enable the motor.** Go to the **System** tab, tick `Motor 01`, press
    **Enable**. The **Motor Feedback** table now shows live rows for the
    motor (state, fault code, position, velocity, torque, voltage,
    temperatures) even before you send any setpoint.
+   ![enable\_motor](./images/enable_motor.png)
 6. **Send a target.** Go to the **MIT** tab, tick `Motor 01`, enter a target
    position e.g. `0.5` rad, keep the default velocity / `Kp` / `Kd` / `Tff`
    values and the default 10 ms interval, then press **Start Sending**.
+   ![send\_cmd](./images/send_cmd.png)
 7. **Watch it move.** The motor moves to the target while the feedback table
    and the plot panel update in real time. Check the plot: the `Position`
    curve should converge to 0.5 rad (§9).
@@ -127,6 +131,8 @@ The window is split into three vertical regions:
      - **Register Access** group (single read/write + per-motor tables).
    - **Right panel**: the waveform plot panel.
 3. **Bottom** — the **Communication Log** with a `Clear Log` button.
+
+![main\_window](./images/main_window.png)
 
 The status bar shows the total received frame count and the live feedback
 rate in Hz (updated every 1 s).
@@ -159,6 +165,8 @@ the text boxes at each tick, so you can edit targets while running.
 
 ### 5.1 MIT Mode (`0x100|node`, aggregate `0x001`)
 
+![mit\_torque](./images/mit_torque.png)
+
 Per-motor inputs:
 
 | Input | Meaning | Unit | Encoding (LSB) |
@@ -180,6 +188,8 @@ Per-motor inputs:
 
 ### 5.2 Pos-Vel Mode (`0x180|node`, aggregate `0x002`)
 
+![pos\_vel](./images/pos_vel.png)
+
 Per-motor inputs:
 
 | Input | Meaning | Unit | Encoding |
@@ -192,6 +202,8 @@ Per-motor inputs:
 - Interval range 10–5000 ms, default **10 ms**.
 
 ### 5.3 Const Vel Mode (`0x200|node`, aggregate `0x003`)
+
+![const\_vel](./images/const_vel.png)
 
 Per-motor inputs:
 
@@ -267,6 +279,8 @@ controlled ramp:
 
 ## 6. System Commands (`0x400|node`)
 
+![sys\_cmd](./images/sys_cmd.png)
+
 Tick the motor(s) to command, then press one of the buttons. A frame is sent
 per ticked motor.
 
@@ -296,6 +310,8 @@ A typical power-up → motion → release sequence:
 ---
 
 ## 7. Motor Feedback
+
+![motor\_fb](./images/motor_fb.png)
 
 Feedback arrives on `0x600|node` (single-motor frame) and on the aggregate
 feedback frames `0x701` (MIT), `0x702` (Pos-Vel), `0x703` (Const Vel) — the
@@ -348,6 +364,8 @@ system command after removing the cause.
 
 ### 8.1 Single-register read / write
 
+![register\_access\_single](./images/register_access_single.png)
+
 - **Motor** spin box: NODE_ID (0x00…0x7F).
 - **Addr** spin box: register address (0x00…0xFF, hexadecimal display).
 - **Value** edit box: typed value — `float32` registers accept a decimal
@@ -369,6 +387,8 @@ Responses also carry an **RSTAT** status byte (protocol §8.3):
 | 4 | State forbid |
 
 ### 8.2 Per-motor register tables & "Read All"
+
+![register\_read\_all](./images/register_read_all.png)
 
 For each motor (01…03) there is a page with the **full register catalogue**
 columns `Addr | Name | Value | RSTAT`. Press **Read All** to read every
@@ -455,11 +475,15 @@ register of that motor:
 
 ## 9. Waveform Plotting
 
+![plot\_overview](./images/plot_overview.png)
+
 The right-hand **plot panel** shows feedback signals as live time-series
 curves. The **`+`** button adds a new diagram; each diagram shows one signal
 type for the selected motors over a rolling 5-second window.
 
 Per diagram:
+
+![single\_diagram](./images/single_diagram.png)
 
 - **Signal selector** (top-left of the diagram): `Position (rad)`,
   `Velocity (rad/s)`, `Torque (N·m)`, `Voltage (V)`, `MOS Temp (°C)`,
@@ -500,6 +524,8 @@ them are plotted.
 ---
 
 ## 10. Communication Log
+
+![log](./images/log.png)
 
 The bottom pane logs every transmitted/received frame:
 
