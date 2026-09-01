@@ -16,6 +16,10 @@ Frame Protocol V0.1* and provides:
   reads with automatic unit scaling.
 - **Live waveform plotting** with per-motor curves, zoom, and history review.
 
+**Git repository address**: 
+- https://github.com/lzh9780/YWD_gui
+- https://gitee.com/ningbo-top-group-co-ltd_1/YWD_gui.git
+
 ---
 
 ## 1. Hardware Requirements
