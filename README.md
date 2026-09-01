@@ -74,7 +74,8 @@ cmake --build build
 ```
 
 If the ZCAN SDK is already installed in a standard location you can omit the
-two `-D` options. The resulting binary is `build/YWD_Motor_Control`.
+two `-D` options. The resulting binary is `build/YWD_Motor_Control`. Both files
+are included in this repository (`include/zcan.h` and `lib/libusbcanfd.so`).
 
 Run:
 
