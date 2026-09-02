@@ -593,7 +593,7 @@ The bottom pane logs every transmitted/received frame:
 |---------|--------------------|
 | `VCI_OpenDevice failed` | Adapter not plugged in, not a ZCAN device, or USB permissions — run as root / add udev rule |
 | `VCI_InitCAN failed` | Bus not terminated, or the fixed 1 Mbps / 5 Mbps bit-rate does not match the bus |
-| Connect succeeds but no feedback | Wrong NODE_ID wiring; check the motor address and that the motor is powered |
+| Connect succeeds but no feedback | Wrong NODE_ID wiring; check the motor address and that the motor is powered; Try 80 MHz clock (current 60 MHz) |
 | Motor does not move after Start | Motor not **Enabled** first (System tab → Enable); check fault code in the table |
 | Only some motors plot | Ensure their checkboxes are ticked; aggregate feedback (`0x701–0x703`) must be enabled on the firmware side (it is decoded automatically by the GUI) |
 | Fault 0x06 (comm lost) | Control interval too long for the configured `CMD_TIMEOUT`, or bus error frames — shorten the send interval or raise CMD_TIMEOUT |
