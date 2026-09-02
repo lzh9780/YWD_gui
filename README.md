@@ -30,6 +30,8 @@ CAN-FD adapter** using the official **ZCAN / VCI driver library** (`usbcanfd`).
 > This is the **only** supported hardware path — a ZLG CAN-FD adapter must be
 > plugged into a USB port before the software can connect.
 
+![ZLG\_canfd](./images/ZLG_canfd.png)
+
 Recommended hardware:
 
 | Item | Requirement |
