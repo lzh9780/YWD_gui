@@ -663,7 +663,7 @@ checked (uncheck it to hide raw dumps and keep only status messages):
 |---------|--------------------|
 | `VCI_OpenDevice failed` | Adapter not plugged in, not a ZCAN device, or USB permissions — run as root / add udev rule |
 | `VCI_InitCAN failed` | Bus not terminated, or the fixed 1 Mbps / 5 Mbps bit-rate does not match the bus |
-| Connect succeeds but no feedback | Wrong NODE_ID wiring; check the node-ID scan log and that the motors are powered |
+| Connect succeeds but no feedback | Wrong NODE_ID wiring; check the node-ID scan log and that the motors are powered; Try 80 MHz clock (current 60 MHz) |
 | No nodes found by the scan | Motors not powered, wrong bit-rate, or IDs outside 1–127 |
 | Motor does not move after Start | Motor not **Enabled** first (System tab → Enable); check fault code in the table |
 | Only some motors plot | Ensure their checkboxes are ticked; feedback frames for all nodes are decoded automatically |
