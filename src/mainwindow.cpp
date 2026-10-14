@@ -5,12 +5,14 @@
 #include <QGridLayout>
 #include <QFormLayout>
 #include <QMessageBox>
+#include <QFileDialog>
 #include <QDateTime>
 #include <QStatusBar>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
 #include <QHeaderView>
 #include <QScrollBar>
+#include <QStringList>
 #include <cstring>
 #include <cmath>
 #include <climits>
@@ -18,6 +20,16 @@
 // ============================================================================
 // Helpers
 // ============================================================================
+// Render a list of node IDs as "0x01, 0x02, ..." (used by the node scan log).
+static QString formatNodeList(const QVector<uint8_t> &nodes)
+{
+    QStringList parts;
+    parts.reserve(nodes.size());
+    for (uint8_t n : nodes)
+        parts << QString("0x%1").arg(n, 2, 16, QChar('0')).toUpper();
+    return parts.join(", ");
+}
+
 QString MainWindow::hexStr(uint32_t val, int digits)
 {
     return QString("%1").arg(val, digits, 16, QChar('0')).toUpper();
@@ -59,7 +71,7 @@ bool MainWindow::validateSendInputs(QLineEdit *const edits[], int n, int motorId
         if (!parseLineEdit(edits[i], v)) {
             QMessageBox::warning(
                 const_cast<MainWindow *>(this), "Invalid Input",
-                QString("Motor 0x0%1: all parameter fields must be valid decimal numbers "
+                QString("Motor %1: all parameter fields must be valid decimal numbers "
                         "(field \"%2\" is empty or invalid).")
                     .arg(motorIdx + 1)
                     .arg(edits[i]->toolTip()));
@@ -70,7 +82,7 @@ bool MainWindow::validateSendInputs(QLineEdit *const edits[], int n, int motorId
 }
 
 QWidget *MainWindow::makeLineRow(const QString &label,
-                                 QLineEdit *e0, QLineEdit *e1, QLineEdit *e2)
+                                 QLineEdit *const *edits, int n)
 {
     auto *w = new QWidget();
     auto *h = new QHBoxLayout(w);
@@ -80,9 +92,8 @@ QWidget *MainWindow::makeLineRow(const QString &label,
     lbl->setFixedWidth(90);
     lbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     h->addWidget(lbl);
-    h->addWidget(e0);
-    h->addWidget(e1);
-    h->addWidget(e2);
+    for (int i = 0; i < n; ++i)
+        h->addWidget(edits[i]);
     h->addStretch();
     return w;
 }
@@ -138,7 +149,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_allRegs = YwdProtocol::getAllRegisters();
 
     // Populate each motor page's register table — 4 cols: Addr|Name|Value|RSTAT
-    for (int mi = 0; mi < 3; ++mi) {
+    for (int mi = 0; mi < kMaxMotors; ++mi) {
         m_regTables[mi]->setRowCount(m_allRegs.size());
         for (int i = 0; i < m_allRegs.size(); ++i) {
             const RegInfo &r = m_allRegs[i];
@@ -177,6 +188,11 @@ void MainWindow::setupUi()
     m_btnConnect->setFixedWidth(90);
     connect(m_btnConnect, &QPushButton::clicked, this, &MainWindow::onDeviceToggle);
     devRow->addWidget(m_btnConnect);
+    m_btnOta = new QPushButton("OTA");
+    m_btnOta->setFixedWidth(70);
+    m_btnOta->setToolTip("Open the firmware upgrade (OTA) window");
+    connect(m_btnOta, &QPushButton::clicked, this, &MainWindow::onOpenOtaWindow);
+    devRow->addWidget(m_btnOta);
     mainLayout->addLayout(devRow);
 
     // ---- Row 1: Two-column splitter (left controls | right diagrams) ----
@@ -200,24 +216,6 @@ void MainWindow::setupUi()
     setupModeCheckboxExclusion();
 
     leftV->addWidget(m_cmdTabs);
-
-    // -- Multi-motor feedback table --
-    {
-        QGroupBox *grp = new QGroupBox("Motor Feedback");
-        QVBoxLayout *vl = new QVBoxLayout(grp);
-        vl->setContentsMargins(2, 2, 2, 2);
-        m_feedbackTable = new QTableWidget(0, 11);
-        m_feedbackTable->setHorizontalHeaderLabels(
-            {"Motor", "State", "Fault", "Mode", "Position", "Velocity",
-             "Torque", "Voltage", "MOS T", "Mot T", "SEQ"});
-        m_feedbackTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-        m_feedbackTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        m_feedbackTable->verticalHeader()->setVisible(false);
-        m_feedbackTable->setMaximumHeight(120);
-        m_feedbackTable->horizontalHeader()->setStretchLastSection(true);
-        vl->addWidget(m_feedbackTable);
-        leftV->addWidget(grp);
-    }
 
     // -- Register access --
     {
@@ -280,7 +278,7 @@ void MainWindow::setupUi()
         // Motor pages: each motor has its own table + Read All button
         m_regMotorTabs = new QTabWidget();
         m_regMotorTabs->setDocumentMode(true);
-        for (int mi = 0; mi < 3; ++mi) {
+        for (int mi = 0; mi < kMaxMotors; ++mi) {
             QWidget *page = new QWidget();
             QVBoxLayout *pl = new QVBoxLayout(page);
             pl->setContentsMargins(2, 2, 2, 2);
@@ -300,15 +298,17 @@ void MainWindow::setupUi()
             QHBoxLayout *br = new QHBoxLayout();
             m_btnReadAllMotor[mi] = new QPushButton("Read All");
             m_btnReadAllMotor[mi]->setFixedWidth(80);
-            uint8_t mid = static_cast<uint8_t>(0x01 + mi);
-            connect(m_btnReadAllMotor[mi], &QPushButton::clicked, this, [this, mid]{ onReadAllRegs(mid); });
+            // Bind to the page index; the actual node ID is resolved at click
+            // time via the scan-derived mapping.
+            connect(m_btnReadAllMotor[mi], &QPushButton::clicked, this,
+                    [this, mi]{ onReadAllRegs(static_cast<uint8_t>(mi + 1)); });
             br->addWidget(m_btnReadAllMotor[mi]);
             m_lblReadAllMotor[mi] = new QLabel("");
             m_lblReadAllMotor[mi]->setStyleSheet("color: #aaa; font-family: monospace;");
             br->addWidget(m_lblReadAllMotor[mi], 1);
             pl->addLayout(br);
 
-            m_regMotorTabs->addTab(page, QString("Motor 0x0%1").arg(mi + 1));
+            m_regMotorTabs->addTab(page, QString("Motor %1").arg(mi + 1));
         }
         vl->addWidget(m_regMotorTabs);
 
@@ -330,28 +330,71 @@ void MainWindow::setupUi()
 
     mainLayout->addWidget(hSplit, 1);
 
-    // ---- Row 2: Log (bottom) ----
-    QGroupBox *logGrp = new QGroupBox("Communication Log");
-    QVBoxLayout *logLay = new QVBoxLayout(logGrp);
-    logLay->setContentsMargins(2, 2, 2, 2);
+    // ---- Row 2: Feedback / Log (switchable bottom panel) ----
+    m_bottomTabs = new QTabWidget();
+    m_bottomTabs->setDocumentMode(true);
 
-    m_logView = new QTextEdit();
-    m_logView->setReadOnly(true);
-    m_logView->setFixedHeight(100);
-    m_logView->setFont(QFont("monospace", 9));
-    m_logView->setStyleSheet("background: #1e1e1e; color: #d4d4d4;");
-    m_logView->document()->setMaximumBlockCount(2000);
+    // -- Tab 1: Motor Feedback table --
+    {
+        QWidget *fbPage = new QWidget();
+        QVBoxLayout *vl = new QVBoxLayout(fbPage);
+        vl->setContentsMargins(2, 2, 2, 2);
+        m_feedbackTable = new QTableWidget(0, 12);
+        m_feedbackTable->setHorizontalHeaderLabels(
+            {"Motor", "State", "Fault", "Mode", "Position", "Velocity",
+             "Torque", "Voltage", "MOS T", "Mot T", "Recs", "SEQ"});
+        m_feedbackTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_feedbackTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_feedbackTable->verticalHeader()->setVisible(false);
+        m_feedbackTable->horizontalHeader()->setStretchLastSection(true);
+        vl->addWidget(m_feedbackTable);
 
-    QHBoxLayout *logBtnRow = new QHBoxLayout();
-    logBtnRow->addStretch();
-    QPushButton *btnClearLog = new QPushButton("Clear Log");
-    btnClearLog->setFixedWidth(80);
-    connect(btnClearLog, &QPushButton::clicked, m_logView, &QTextEdit::clear);
-    logBtnRow->addWidget(btnClearLog);
+        QHBoxLayout *fbBtnRow = new QHBoxLayout();
+        fbBtnRow->addStretch();
+        QPushButton *btnClearFb = new QPushButton("Clear Feedback");
+        btnClearFb->setFixedWidth(120);
+        connect(btnClearFb, &QPushButton::clicked, this, [this] {
+            m_feedbackTable->setRowCount(0);
+            m_lastFeedback.clear();
+        });
+        fbBtnRow->addWidget(btnClearFb);
+        vl->addLayout(fbBtnRow);
 
-    logLay->addWidget(m_logView);
-    logLay->addLayout(logBtnRow);
-    mainLayout->addWidget(logGrp);
+        m_bottomTabs->addTab(fbPage, "Feedback");
+    }
+
+    // -- Tab 2: Communication Log --
+    {
+        QWidget *logPage = new QWidget();
+        QVBoxLayout *logLay = new QVBoxLayout(logPage);
+        logLay->setContentsMargins(2, 2, 2, 2);
+
+        m_logView = new QTextEdit();
+        m_logView->setReadOnly(true);
+        m_logView->setFont(QFont("monospace", 9));
+        m_logView->setStyleSheet("background: #1e1e1e; color: #d4d4d4;");
+        m_logView->document()->setMaximumBlockCount(2000);
+
+        QHBoxLayout *logBtnRow = new QHBoxLayout();
+        m_chkShowRaw = new QCheckBox("Show Raw Data");
+        m_chkShowRaw->setChecked(false); // Default to hiding raw CAN-FD frames in the log
+        m_chkShowRaw->setToolTip("Show/hide raw CAN-FD frame dumps in the log");
+        logBtnRow->addWidget(m_chkShowRaw);
+        logBtnRow->addStretch();
+        QPushButton *btnClearLog = new QPushButton("Clear Log");
+        btnClearLog->setFixedWidth(80);
+        connect(btnClearLog, &QPushButton::clicked, m_logView, &QTextEdit::clear);
+        logBtnRow->addWidget(btnClearLog);
+
+        logLay->addWidget(m_logView, 1);
+        logLay->addLayout(logBtnRow);
+
+        m_bottomTabs->addTab(logPage, "Log");
+    }
+
+    m_bottomTabs->setCurrentIndex(0);
+    m_bottomTabs->setFixedHeight(180);
+    mainLayout->addWidget(m_bottomTabs);
 }
 
 // ============================================================================
@@ -372,7 +415,7 @@ void MainWindow::buildMitTab()
         lbl->setFixedWidth(90);
         lbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         row->addWidget(lbl);
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kMaxMotors; ++i) {
             m_mitEn[i] = new QCheckBox(QString("0x0%1").arg(i + 1));
             m_mitEn[i]->setChecked(true);
             row->addWidget(m_mitEn[i]);
@@ -380,10 +423,10 @@ void MainWindow::buildMitTab()
         m_mitSync = new QCheckBox("Sync");
         m_mitSync->setToolTip(
             "Send identical parameters to every ticked motor.\n"
-            "Motor 1 is the master: its values are replicated, motors 2/3 are read-only.");
+            "Motor 1 is the master: its values are replicated, the others are read-only.");
         connect(m_mitSync, &QCheckBox::toggled, this, [this](bool on) {
             if (on) m_mitEn[0]->setChecked(true);   // motor 1 must be in the group
-            for (int i = 1; i < 3; ++i) {
+            for (int i = 1; i < kMaxMotors; ++i) {
                 m_mitPos[i]->setEnabled(!on);
                 m_mitVel[i]->setEnabled(!on);
                 m_mitKp[i]->setEnabled(!on);
@@ -397,18 +440,18 @@ void MainWindow::buildMitTab()
     }
 
     // Parameter rows — one per parameter, one line edit per motor (aligned with the checkbox columns)
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < kMaxMotors; ++i) {
         m_mitPos[i] = makeLineEdit("0");
         m_mitVel[i] = makeLineEdit("0");
         m_mitKp[i]  = makeLineEdit("0");
         m_mitKd[i]  = makeLineEdit("0");
         m_mitTff[i] = makeLineEdit("0");
     }
-    vl->addWidget(makeLineRow("Pos (rad):",        m_mitPos[0], m_mitPos[1], m_mitPos[2]));
-    vl->addWidget(makeLineRow("Vel (rad/s):",      m_mitVel[0], m_mitVel[1], m_mitVel[2]));
-    vl->addWidget(makeLineRow("Kp (Nm/rad):",      m_mitKp[0],  m_mitKp[1],  m_mitKp[2]));
-    vl->addWidget(makeLineRow("Kd (Nm/(rad/s)):",  m_mitKd[0],  m_mitKd[1],  m_mitKd[2]));
-    vl->addWidget(makeLineRow("Tff (Nm):",         m_mitTff[0], m_mitTff[1], m_mitTff[2]));
+    vl->addWidget(makeLineRow("Pos (rad):",        m_mitPos, kMaxMotors));
+    vl->addWidget(makeLineRow("Vel (rad/s):",      m_mitVel, kMaxMotors));
+    vl->addWidget(makeLineRow("Kp (Nm/rad):",      m_mitKp,  kMaxMotors));
+    vl->addWidget(makeLineRow("Kd (Nm/(rad/s)):",  m_mitKd,  kMaxMotors));
+    vl->addWidget(makeLineRow("Tff (Nm):",         m_mitTff, kMaxMotors));
 
     // Interval + toggle button
     {
@@ -452,7 +495,7 @@ void MainWindow::buildPosVelTab()
         lbl->setFixedWidth(90);
         lbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         row->addWidget(lbl);
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kMaxMotors; ++i) {
             m_pvEn[i] = new QCheckBox(QString("0x0%1").arg(i + 1));
             m_pvEn[i]->setChecked(false);   // default control mode = MIT
             row->addWidget(m_pvEn[i]);
@@ -460,10 +503,10 @@ void MainWindow::buildPosVelTab()
         m_pvSync = new QCheckBox("Sync");
         m_pvSync->setToolTip(
             "Send identical parameters to every ticked motor.\n"
-            "Motor 1 is the master: its values are replicated, motors 2/3 are read-only.");
+            "Motor 1 is the master: its values are replicated, the others are read-only.");
         connect(m_pvSync, &QCheckBox::toggled, this, [this](bool on) {
             if (on) m_pvEn[0]->setChecked(true);   // motor 1 must be in the group
-            for (int i = 1; i < 3; ++i) {
+            for (int i = 1; i < kMaxMotors; ++i) {
                 m_pvPos[i]->setEnabled(!on);
                 m_pvVelLim[i]->setEnabled(!on);
                 m_pvAcc[i]->setEnabled(!on);
@@ -476,7 +519,7 @@ void MainWindow::buildPosVelTab()
     }
 
     // Pos | Vel limit | Acc | Dec — one line edit per motor (aligned with the checkbox columns)
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < kMaxMotors; ++i) {
         m_pvPos[i]    = makeLineEdit("0");
         m_pvVelLim[i] = makeLineEdit("0");
         m_pvAcc[i]    = makeLineEdit("0");
@@ -484,10 +527,10 @@ void MainWindow::buildPosVelTab()
         m_pvDec[i]    = makeLineEdit("0");
         m_pvDec[i]->setToolTip("Deceleration (rad/s²). 0 = use register default.");
     }
-    vl->addWidget(makeLineRow("Pos (rad):",         m_pvPos[0],    m_pvPos[1],    m_pvPos[2]));
-    vl->addWidget(makeLineRow("Vel limit (rad/s):", m_pvVelLim[0], m_pvVelLim[1], m_pvVelLim[2]));
-    vl->addWidget(makeLineRow("Acc (rad/s²):",      m_pvAcc[0],    m_pvAcc[1],    m_pvAcc[2]));
-    vl->addWidget(makeLineRow("Dec (rad/s²):",      m_pvDec[0],    m_pvDec[1],    m_pvDec[2]));
+    vl->addWidget(makeLineRow("Pos (rad):",         m_pvPos,    kMaxMotors));
+    vl->addWidget(makeLineRow("Vel limit (rad/s):", m_pvVelLim, kMaxMotors));
+    vl->addWidget(makeLineRow("Acc (rad/s²):",      m_pvAcc,    kMaxMotors));
+    vl->addWidget(makeLineRow("Dec (rad/s²):",      m_pvDec,    kMaxMotors));
 
     // Interval + toggle
     {
@@ -531,7 +574,7 @@ void MainWindow::buildConstVelTab()
         lbl->setFixedWidth(90);
         lbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         row->addWidget(lbl);
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kMaxMotors; ++i) {
             m_cvEn[i] = new QCheckBox(QString("0x0%1").arg(i + 1));
             m_cvEn[i]->setChecked(false);   // default control mode = MIT
             row->addWidget(m_cvEn[i]);
@@ -539,10 +582,10 @@ void MainWindow::buildConstVelTab()
         m_cvSync = new QCheckBox("Sync");
         m_cvSync->setToolTip(
             "Send identical parameters to every ticked motor.\n"
-            "Motor 1 is the master: its values are replicated, motors 2/3 are read-only.");
+            "Motor 1 is the master: its values are replicated, the others are read-only.");
         connect(m_cvSync, &QCheckBox::toggled, this, [this](bool on) {
             if (on) m_cvEn[0]->setChecked(true);   // motor 1 must be in the group
-            for (int i = 1; i < 3; ++i) {
+            for (int i = 1; i < kMaxMotors; ++i) {
                 m_cvVel[i]->setEnabled(!on);
                 m_cvAcc[i]->setEnabled(!on);
                 m_cvDec[i]->setEnabled(!on);
@@ -554,16 +597,16 @@ void MainWindow::buildConstVelTab()
     }
 
     // Vel | Acc | Dec — one line edit per motor (aligned with the checkbox columns)
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < kMaxMotors; ++i) {
         m_cvVel[i] = makeLineEdit("0");
         m_cvAcc[i] = makeLineEdit("0");
         m_cvAcc[i]->setToolTip("Acceleration (rad/s²). 0 = use register default.");
         m_cvDec[i] = makeLineEdit("0");
         m_cvDec[i]->setToolTip("Deceleration (rad/s²). 0 = use register default.");
     }
-    vl->addWidget(makeLineRow("Vel (rad/s):", m_cvVel[0], m_cvVel[1], m_cvVel[2]));
-    vl->addWidget(makeLineRow("Acc (rad/s²):", m_cvAcc[0], m_cvAcc[1], m_cvAcc[2]));
-    vl->addWidget(makeLineRow("Dec (rad/s²):", m_cvDec[0], m_cvDec[1], m_cvDec[2]));
+    vl->addWidget(makeLineRow("Vel (rad/s):", m_cvVel, kMaxMotors));
+    vl->addWidget(makeLineRow("Acc (rad/s²):", m_cvAcc, kMaxMotors));
+    vl->addWidget(makeLineRow("Dec (rad/s²):", m_cvDec, kMaxMotors));
 
     // Interval + toggle
     {
@@ -603,7 +646,7 @@ void MainWindow::buildSystemTab()
     {
         auto *row = new QHBoxLayout();
         row->addWidget(new QLabel("Motor:"));
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kMaxMotors; ++i) {
             m_sysEn[i] = new QCheckBox(QString("0x0%1").arg(i + 1));
             m_sysEn[i]->setChecked(true);
             row->addWidget(m_sysEn[i]);
@@ -640,13 +683,44 @@ void MainWindow::buildSystemTab()
 }
 
 // ============================================================================
+// OTA / IAP — open the standalone firmware-upgrade window (protocol v2)
+// ============================================================================
+void MainWindow::onOpenOtaWindow()
+{
+    if (!m_otaWindow) {
+        m_otaWindow = new OtaWindow(this);
+
+        // OTA frames are transmitted through the shared CAN device.
+        connect(m_otaWindow, &OtaWindow::sendFrameRequested,
+                this, [this](const CanFdFrame &f) {
+                    m_device->sendFrame(f);
+                    logRawTx(f, "TX ota");
+                });
+        // OTA log lines are forwarded to the main window's communication log.
+        connect(m_otaWindow, &OtaWindow::logMessage,
+                this, &MainWindow::logMessage);
+    }
+
+    // Target node defaults to the register-tab motor selection.
+    m_otaWindow->setTargetNode(static_cast<quint8>(m_regMotorId->value()));
+    m_otaWindow->setConnected(m_connected);
+    m_otaWindow->setAnchorGeometry(frameGeometry());
+
+    // Stop the periodic control senders — OTA owns the bus during a session.
+    if (m_otaWindow->isVisible())
+        stopAllTimers();
+
+    m_otaWindow->show();
+}
+
+// ============================================================================
 // Same-motor checkbox mutual exclusion across the control-mode tabs.
 // Checking a motor in one mode unchecks it in the other two, so every motor
 // has at most one control mode. System-tab checkboxes are excluded.
 // ============================================================================
 void MainWindow::setupModeCheckboxExclusion()
 {
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < kMaxMotors; ++i) {
         connect(m_mitEn[i], &QCheckBox::toggled, this, [this, i](bool checked) {
             if (checked) {
                 m_pvEn[i]->setChecked(false);
@@ -679,6 +753,10 @@ void MainWindow::logMessage(const QString &msg)
 
 void MainWindow::logRawTx(const CanFdFrame &frame, const QString &dir)
 {
+    // Raw frame dumps are optional — toggled by the "Show Raw Data" switch.
+    if (m_chkShowRaw && !m_chkShowRaw->isChecked())
+        return;
+
     QString hex;
     for (int i = 0; i < frame.len; ++i)
         hex += QString(" %1").arg(frame.data[i], 2, 16, QChar('0')).toUpper();
@@ -695,6 +773,7 @@ void MainWindow::logRawTx(const CanFdFrame &frame, const QString &dir)
 void MainWindow::onDeviceToggle()
 {
     if (m_connected) {
+        stopNodeScan();
         stopAllTimers();
         m_device->stopReceive();
         m_device->close();
@@ -702,6 +781,7 @@ void MainWindow::onDeviceToggle()
         m_btnConnect->setText("Connect");
         m_lblDevStatus->setText("Disconnected");
         m_lblDevStatus->setStyleSheet("color: #888;");
+        if (m_otaWindow) m_otaWindow->setConnected(false);
         logMessage("Device disconnected.");
     } else {
         bool ok = m_device->open();
@@ -715,7 +795,11 @@ void MainWindow::onDeviceToggle()
         m_btnConnect->setText("Disconnect");
         m_lblDevStatus->setText("Connected");
         m_lblDevStatus->setStyleSheet("color: #4caf50; font-weight: bold;");
+        if (m_otaWindow) m_otaWindow->setConnected(true);
         logMessage("Device opened successfully.");
+
+        // Discover active nodes (node IDs may be reassigned, not fixed 1..4).
+        startNodeScan();
     }
 }
 
@@ -730,6 +814,153 @@ void MainWindow::stopAllTimers()
 }
 
 // ============================================================================
+// Node-ID scan — discover active nodes by reading REG_NODE_ID (0x00) on every
+// candidate CAN node ID. A device only answers when the CAN ID matches its own
+// node ID, so a response proves the node exists. 0.05 s timeout per probe;
+// the scan ends early once kScanTargetCount (4) nodes have responded.
+// ============================================================================
+void MainWindow::startNodeScan()
+{
+    if (m_scanning) stopNodeScan();
+
+    m_scanning = true;
+    m_scanNode = 0x01;
+    m_scanFound.clear();
+
+    // Invalidate all pages until the scan binds them to a discovered node.
+    for (int i = 0; i < kMaxMotors; ++i) {
+        m_nodeIds[i]   = 0;
+        m_nodeValid[i] = false;
+        setMotorPageEnabled(i, false);
+    }
+
+    if (!m_scanTimer) {
+        m_scanTimer = new QTimer(this);
+        connect(m_scanTimer, &QTimer::timeout, this, &MainWindow::onNodeScanTick);
+    }
+    logMessage(QString("[Scan] Node-ID scan started (probe reg 0x%1, timeout %2 ms)")
+                   .arg(REG_NODE_ID, 2, 16, QChar('0'))
+                   .arg(kScanProbeTimeoutMs));
+    onNodeScanTick();   // send the first probe immediately
+}
+
+void MainWindow::stopNodeScan()
+{
+    if (m_scanTimer) m_scanTimer->stop();
+    m_scanning = false;
+}
+
+// Push the scan result into the motor-page → node-ID map, then reflect it in
+// each register table's "Node ID" (RID 0x00) row. Pages keep their names
+// ("Motor 1".."Motor 4"); only the underlying CAN node ID changes.
+void MainWindow::applyNodeMap()
+{
+    // Assign discovered nodes to pages in order. Pages without a discovered
+    // node (index >= found count) are marked unknown (id 0, invalid) and all
+    // of their related controls are disabled.
+    const int found = m_scanFound.size();
+    for (int i = 0; i < kMaxMotors; ++i) {
+        if (i < found) {
+            m_nodeIds[i]   = m_scanFound[i];
+            m_nodeValid[i] = true;
+        } else {
+            m_nodeIds[i]   = 0;
+            m_nodeValid[i] = false;
+        }
+    }
+
+    // Reflect the mapping in each page: node ID + RSTAT row, table state.
+    for (int mi = 0; mi < kMaxMotors; ++mi) {
+        const bool valid = m_nodeValid[mi];
+        setMotorPageEnabled(mi, valid);
+        m_plotPanel_->setMotorAvailable(static_cast<uint8_t>(mi + 1), valid);
+
+        QTableWidget *tbl = m_regTables[mi];
+        if (!tbl) continue;
+        for (int r = 0; r < tbl->rowCount(); ++r) {
+            auto *it = tbl->item(r, 0);
+            if (!it) continue;
+            bool ok = false;
+            const uint16_t rowAddr = it->text().toUInt(&ok, 16);
+            if (ok && rowAddr == REG_NODE_ID) {
+                auto *vi = tbl->item(r, 2);
+                if (!vi) { vi = new QTableWidgetItem(); tbl->setItem(r, 2, vi); }
+                auto *si = tbl->item(r, 3);
+                if (!si) { si = new QTableWidgetItem(); tbl->setItem(r, 3, si); }
+
+                if (valid) {
+                    vi->setText(QString("0x%1")
+                                    .arg(m_nodeIds[mi], 2, 16, QChar('0')).toUpper());
+                    vi->setForeground(QColor("#1F6FB2"));
+                    si->setText("OK (0x00)");
+                    si->setForeground(QColor("#4caf50"));
+                } else {
+                    vi->setText("unknown");
+                    vi->setForeground(QColor("#c62828"));
+                    si->setText("--");
+                    si->setForeground(QColor("#888"));
+                }
+                break;
+            }
+        }
+    }
+
+    if (found == 0) {
+        logMessage("[Scan] No nodes found — all motor pages disabled.");
+    } else if (found < kMaxMotors) {
+        QStringList avail, missing;
+        for (int i = 0; i < kMaxMotors; ++i)
+            (m_nodeValid[i] ? avail : missing)
+                << QString("Motor %1").arg(i + 1);
+        logMessage(QString("[Scan] Only %1/%2 nodes found (available: %3). "
+                           "Disabled: %4")
+                       .arg(found).arg(kMaxMotors)
+                       .arg(avail.join(", "), missing.join(", ")));
+    }
+
+    logMessage(QString("[Scan] Motor mapping: Motor 1->%1  Motor 2->%2  "
+                       "Motor 3->%3  Motor 4->%4")
+                   .arg(m_nodeValid[0] ? QString("0x%1").arg(m_nodeIds[0], 2, 16, QChar('0')).toUpper() : "unknown")
+                   .arg(m_nodeValid[1] ? QString("0x%1").arg(m_nodeIds[1], 2, 16, QChar('0')).toUpper() : "unknown")
+                   .arg(m_nodeValid[2] ? QString("0x%1").arg(m_nodeIds[2], 2, 16, QChar('0')).toUpper() : "unknown")
+                   .arg(m_nodeValid[3] ? QString("0x%1").arg(m_nodeIds[3], 2, 16, QChar('0')).toUpper() : "unknown"));
+}
+
+void MainWindow::onNodeScanTick()
+{
+    if (!m_scanning || !m_connected) {
+        stopNodeScan();
+        return;
+    }
+
+    // Wait for the response window of the probe just sent before advancing.
+    if (m_scanTimer->isActive()
+        && m_scanElapsed.elapsed() < kScanProbeTimeoutMs) {
+        return;
+    }
+
+    if (m_scanNode > kScanMaxNode) {
+        logMessage(QString("[Scan] Done — %1 node(s) found: %2")
+                       .arg(m_scanFound.size())
+                       .arg(m_scanFound.isEmpty() ? QString("none")
+                                                  : formatNodeList(m_scanFound)));
+        stopNodeScan();
+        applyNodeMap();
+        return;
+    }
+
+    // Send a single-register read of REG_NODE_ID to the candidate CAN node.
+    CanFdFrame f = m_proto.encodeRegRead(static_cast<uint8_t>(m_scanNode),
+                                         REG_NODE_ID);
+    m_device->sendFrame(f);
+    logRawTx(f, "TX scan");
+
+    m_scanElapsed.restart();
+    m_scanTimer->start(kScanProbeTimeoutMs);
+    ++m_scanNode;
+}
+
+// ============================================================================
 // MIT Tab — per-motor periodic send
 // ============================================================================
 void MainWindow::onMitToggle()
@@ -738,7 +969,7 @@ void MainWindow::onMitToggle()
         m_mitTimer->stop();
         m_mitRunning = false;
         // Release motors owned by MIT so another mode can take them.
-        for (int i = 0; i < 3; ++i)
+        for (int i = 0; i < kMaxMotors; ++i)
             if (m_motorMode[i] == MODE_MIT) m_motorMode[i] = MODE_NONE;
         m_btnMitToggle->setText("Start Sending");
         m_btnMitToggle->setStyleSheet(
@@ -748,7 +979,7 @@ void MainWindow::onMitToggle()
         // Take over every checked motor — each motor keeps exactly one
         // control mode (System commands are exempt).
         QString taken;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kMaxMotors; ++i) {
             if (!m_mitEn[i]->isChecked()) continue;
             if (m_motorMode[i] != MODE_NONE && m_motorMode[i] != MODE_MIT)
                 taken += QString("0x0%1 ").arg(i + 1);
@@ -758,7 +989,7 @@ void MainWindow::onMitToggle()
             logMessage(QString("MIT takes over motor(s): %1").arg(taken));
 
         // Validate the send inputs of every checked motor before starting.
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kMaxMotors; ++i) {
             if (!m_mitEn[i]->isChecked()) continue;
             QLineEdit *edits[] = {m_mitPos[i], m_mitVel[i], m_mitKp[i], m_mitKd[i], m_mitTff[i]};
             if (!validateSendInputs(edits, 5, i)) return;
@@ -787,7 +1018,8 @@ void MainWindow::onMitTick()
 
     // Collect motors that are ticked and owned by this mode.
     QVector<int> active;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < kMaxMotors; ++i) {
+        if (!m_nodeValid[i]) continue;              // node unknown → never command
         if (!m_mitEn[i]->isChecked()) {
             // Motor deselected mid-run → release it for other modes.
             if (m_motorMode[i] == MODE_MIT) m_motorMode[i] = MODE_NONE;
@@ -806,12 +1038,12 @@ void MainWindow::onMitTick()
 
     const bool sync = m_mitSync && m_mitSync->isChecked();
     if (active.size() > 1) {
-        // Aggregated frame (YWD_CANFD_聚合帧协议_V0.1.md §4) — one frame for all.
+        // Aggregated frame (V0.2 §6) — one frame for all.
         std::vector<YwdProtocol::AggMitRecord> recs;
         recs.reserve(active.size());
         for (int idx : active) {
             const int src = sync ? 0 : idx;   // sync → replicate motor 1 data
-            recs.push_back({static_cast<uint8_t>(0x01 + idx),
+            recs.push_back({nodeIdForIndex(idx),
                 static_cast<float>(lineEditValue(m_mitPos[src], 0.0)),
                 static_cast<float>(lineEditValue(m_mitVel[src], 0.0)),
                 static_cast<float>(lineEditValue(m_mitKp[src], 0.0)),
@@ -823,7 +1055,7 @@ void MainWindow::onMitTick()
         logRawTx(f, "TX agg");
     } else {
         const int i = active.first();
-        uint8_t mid = static_cast<uint8_t>(0x01 + i);
+        uint8_t mid = nodeIdForIndex(i);
         CanFdFrame f = m_proto.encodeMitCtrl(mid,
             static_cast<float>(lineEditValue(m_mitPos[i], 0.0)),
             static_cast<float>(lineEditValue(m_mitVel[i], 0.0)),
@@ -845,7 +1077,7 @@ void MainWindow::onPvToggle()
         m_pvTimer->stop();
         m_pvRunning = false;
         // Release motors owned by Pos-Vel so another mode can take them.
-        for (int i = 0; i < 3; ++i)
+        for (int i = 0; i < kMaxMotors; ++i)
             if (m_motorMode[i] == MODE_PV) m_motorMode[i] = MODE_NONE;
         m_btnPvToggle->setText("Start Sending");
         m_btnPvToggle->setStyleSheet(
@@ -855,7 +1087,7 @@ void MainWindow::onPvToggle()
         // Take over every checked motor — each motor keeps exactly one
         // control mode (System commands are exempt).
         QString taken;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kMaxMotors; ++i) {
             if (!m_pvEn[i]->isChecked()) continue;
             if (m_motorMode[i] != MODE_NONE && m_motorMode[i] != MODE_PV)
                 taken += QString("0x0%1 ").arg(i + 1);
@@ -865,7 +1097,7 @@ void MainWindow::onPvToggle()
             logMessage(QString("Pos-Vel takes over motor(s): %1").arg(taken));
 
         // Validate the send inputs of every checked motor before starting.
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kMaxMotors; ++i) {
             if (!m_pvEn[i]->isChecked()) continue;
             QLineEdit *edits[] = {m_pvPos[i], m_pvVelLim[i], m_pvAcc[i], m_pvDec[i]};
             if (!validateSendInputs(edits, 4, i)) return;
@@ -894,7 +1126,8 @@ void MainWindow::onPvTick()
 
     // Collect motors that are ticked and owned by this mode.
     QVector<int> active;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < kMaxMotors; ++i) {
+        if (!m_nodeValid[i]) continue;              // node unknown → never command
         if (!m_pvEn[i]->isChecked()) {
             // Motor deselected mid-run → release it for other modes.
             if (m_motorMode[i] == MODE_PV) m_motorMode[i] = MODE_NONE;
@@ -913,12 +1146,12 @@ void MainWindow::onPvTick()
 
     const bool sync = m_pvSync && m_pvSync->isChecked();
     if (active.size() > 1) {
-        // Aggregated frame (YWD_CANFD_聚合帧协议_V0.1.md §4) — one frame for all.
+        // Aggregated frame (V0.2 §6) — one frame for all.
         std::vector<YwdProtocol::AggPosVelRecord> recs;
         recs.reserve(active.size());
         for (int idx : active) {
             const int src = sync ? 0 : idx;   // sync → replicate motor 1 data
-            recs.push_back({static_cast<uint8_t>(0x01 + idx),
+            recs.push_back({nodeIdForIndex(idx),
                 static_cast<float>(lineEditValue(m_pvPos[src], 0.0)),
                 static_cast<float>(lineEditValue(m_pvVelLim[src], 0.0)),
                 static_cast<float>(lineEditValue(m_pvAcc[src], 0.0)),
@@ -929,7 +1162,7 @@ void MainWindow::onPvTick()
         logRawTx(f, "TX agg");
     } else {
         const int i = active.first();
-        uint8_t mid = static_cast<uint8_t>(0x01 + i);
+        uint8_t mid = nodeIdForIndex(i);
         CanFdFrame f = m_proto.encodePosVel(mid,
             static_cast<float>(lineEditValue(m_pvPos[i], 0.0)),
             static_cast<float>(lineEditValue(m_pvVelLim[i], 0.0)),
@@ -950,7 +1183,7 @@ void MainWindow::onCvToggle()
         m_cvTimer->stop();
         m_cvRunning = false;
         // Release motors owned by Const Vel so another mode can take them.
-        for (int i = 0; i < 3; ++i)
+        for (int i = 0; i < kMaxMotors; ++i)
             if (m_motorMode[i] == MODE_CV) m_motorMode[i] = MODE_NONE;
         m_btnCvToggle->setText("Start Sending");
         m_btnCvToggle->setStyleSheet(
@@ -960,7 +1193,7 @@ void MainWindow::onCvToggle()
         // Take over every checked motor — each motor keeps exactly one
         // control mode (System commands are exempt).
         QString taken;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kMaxMotors; ++i) {
             if (!m_cvEn[i]->isChecked()) continue;
             if (m_motorMode[i] != MODE_NONE && m_motorMode[i] != MODE_CV)
                 taken += QString("0x0%1 ").arg(i + 1);
@@ -970,7 +1203,7 @@ void MainWindow::onCvToggle()
             logMessage(QString("Const Vel takes over motor(s): %1").arg(taken));
 
         // Validate the send inputs of every checked motor before starting.
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kMaxMotors; ++i) {
             if (!m_cvEn[i]->isChecked()) continue;
             QLineEdit *edits[] = {m_cvVel[i], m_cvAcc[i], m_cvDec[i]};
             if (!validateSendInputs(edits, 3, i)) return;
@@ -999,7 +1232,8 @@ void MainWindow::onCvTick()
 
     // Collect motors that are ticked and owned by this mode.
     QVector<int> active;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < kMaxMotors; ++i) {
+        if (!m_nodeValid[i]) continue;              // node unknown → never command
         if (!m_cvEn[i]->isChecked()) {
             // Motor deselected mid-run → release it for other modes.
             if (m_motorMode[i] == MODE_CV) m_motorMode[i] = MODE_NONE;
@@ -1018,12 +1252,12 @@ void MainWindow::onCvTick()
 
     const bool sync = m_cvSync && m_cvSync->isChecked();
     if (active.size() > 1) {
-        // Aggregated frame (YWD_CANFD_聚合帧协议_V0.1.md §4) — one frame for all.
+        // Aggregated frame (V0.2 §6) — one frame for all.
         std::vector<YwdProtocol::AggConstVelRecord> recs;
         recs.reserve(active.size());
         for (int idx : active) {
             const int src = sync ? 0 : idx;   // sync → replicate motor 1 data
-            recs.push_back({static_cast<uint8_t>(0x01 + idx),
+            recs.push_back({nodeIdForIndex(idx),
                 static_cast<float>(lineEditValue(m_cvVel[src], 0.0)),
                 static_cast<float>(lineEditValue(m_cvAcc[src], 0.0)),
                 static_cast<float>(lineEditValue(m_cvDec[src], 0.0))});
@@ -1033,7 +1267,7 @@ void MainWindow::onCvTick()
         logRawTx(f, "TX agg");
     } else {
         const int i = active.first();
-        uint8_t mid = static_cast<uint8_t>(0x01 + i);
+        uint8_t mid = nodeIdForIndex(i);
         CanFdFrame f = m_proto.encodeConstVel(mid,
             static_cast<float>(lineEditValue(m_cvVel[i], 0.0)),
             static_cast<float>(lineEditValue(m_cvAcc[i], 0.0)),
@@ -1067,17 +1301,19 @@ void MainWindow::updateDiagramTiming()
 // ============================================================================
 bool MainWindow::modeHasMotors(int mode) const
 {
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < kMaxMotors; ++i)
         if (m_motorMode[i] == mode) return true;
     return false;
 }
 
 QString MainWindow::modeMotorList(int mode) const
 {
+    // Show the actual CAN node ID each page talks to (may differ from the page
+    // number once the scan has remapped nodes).
     QStringList ids;
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < kMaxMotors; ++i)
         if (m_motorMode[i] == mode)
-            ids << QString("0x0%1").arg(i + 1);
+            ids << QString("0x%1").arg(m_nodeIds[i], 2, 16, QChar('0')).toUpper();
     return ids.join(" ");
 }
 
@@ -1095,9 +1331,10 @@ void MainWindow::onSendSystemCmd(int cmdCode)
 {
     if (!m_connected) return;
 
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < kMaxMotors; ++i) {
+        if (!m_nodeValid[i]) continue;              // node unknown → never command
         if (!m_sysEn[i]->isChecked()) continue;
-        uint8_t mid = static_cast<uint8_t>(0x01 + i);
+        uint8_t mid = nodeIdForIndex(i);
         CanFdFrame f = m_proto.encodeSystemCmd(mid, cmdCode);
         m_device->sendFrame(f);
         logRawTx(f, "TX");
@@ -1196,12 +1433,13 @@ bool MainWindow::parseRegValue(uint8_t addr, const QString &text,
     return true;
 }
 
-void MainWindow::onReadAllRegs(uint8_t motor_id)
+void MainWindow::onReadAllRegs(uint8_t motor_page)
 {
     if (!m_connected) return;
-    if (motor_id < 0x01 || motor_id > 0x03) return;
+    if (motor_page < 0x01 || motor_page > kMaxMotors) return;
+    if (!isNodeValid(motor_page - 0x01)) return;   // node unknown → nothing to read
 
-    m_batchMotorIdx = motor_id - 0x01;
+    m_batchMotorIdx = motor_page - 0x01;   // page index; node resolved per block
     m_regBatchIdx = 0;
     m_batchWaiting = false;
     m_batchRetries = 0;
@@ -1232,14 +1470,15 @@ void MainWindow::sendNextRegBlock()
         m_btnReadAllMotor[mi]->setEnabled(true);
         m_btnReadAllMotor[mi]->setText("Read All");
         m_lblReadAllMotor[mi]->setText("Done");
-        logMessage(QString("Batch register read complete (Motor 0x0%1).").arg(mi + 1));
+        logMessage(QString("Batch register read complete (Motor %1).").arg(mi + 1));
         return;
     }
 
     m_batchBlockStart = m_regBatchIdx;
-    uint8_t mid = static_cast<uint8_t>(0x01 + mi);
+    uint8_t mid = nodeIdForIndex(mi);
     std::vector<uint8_t> rids;
-    for (int i = 0; i < 1 && m_regBatchIdx < m_allRegs.size(); ++i, ++m_regBatchIdx)
+    // §8.1: a block READ/WRITE addresses up to 8 registers per frame
+    for (int i = 0; i < 8 && m_regBatchIdx < m_allRegs.size(); ++i, ++m_regBatchIdx)
         rids.push_back(static_cast<uint8_t>(m_allRegs[m_regBatchIdx].addr));
 
     CanFdFrame f = m_proto.encodeRegBlockRead(mid, rids);
@@ -1261,7 +1500,7 @@ void MainWindow::sendNextRegBlock()
 void MainWindow::resendCurrentBlock()
 {
     int mi = m_batchMotorIdx;
-    uint8_t mid = static_cast<uint8_t>(0x01 + mi);
+    uint8_t mid = nodeIdForIndex(mi);
     std::vector<uint8_t> rids;
     for (int i = 0; i < m_batchPendingN; ++i)
         rids.push_back(static_cast<uint8_t>(m_allRegs[m_batchBlockStart + i].addr));
@@ -1284,7 +1523,7 @@ void MainWindow::onBatchReadNext()
         m_regBatchIdx = 0;
         m_batchMotorIdx = 0;
         m_batchWaiting = false;
-        for (int mi = 0; mi < 3; ++mi) {
+        for (int mi = 0; mi < kMaxMotors; ++mi) {
             m_btnReadAllMotor[mi]->setEnabled(true);
             m_btnReadAllMotor[mi]->setText("Read All");
         }
@@ -1304,8 +1543,9 @@ void MainWindow::onBatchReadNext()
         resendCurrentBlock();          // response lost → retry same block
     } else {
         logMessage(
-            QString("Batch read: Motor 0x0%1 block @0x%2 unresponsive, skipping.")
+            QString("Batch read: Motor %1 (node 0x%2) block @0x%3 unresponsive, skipping.")
                 .arg(m_batchMotorIdx + 1)
+                .arg(nodeIdForIndex(m_batchMotorIdx), 2, 16, QChar('0'))
                 .arg(m_allRegs[m_batchBlockStart].addr, 2, 16, QChar('0')));
         m_batchWaiting = false;
         sendNextRegBlock();            // skip — m_regBatchIdx already advanced
@@ -1335,85 +1575,99 @@ void MainWindow::onPollTimer()
 void MainWindow::onFrameReceived(const CanFdFrame &frame)
 {
     ++m_rxCount;
+
+    // OTA uplink (extended 0x08000000|node, §1.2) — forwarded to the OTA window
+    // when open, so heartbeats refresh device identity even when idle.
+    if (m_otaWindow && m_otaWindow->handleFrame(frame))
+        return;
+
     YwdProtocol::FrameType ft = YwdProtocol::classifyFrame(frame.id);
-    if (ft != YwdProtocol::FT_FEEDBACK
-        && ft != YwdProtocol::FT_AGG_FB_MIT
-        && ft != YwdProtocol::FT_AGG_FB_POSVEL
-        && ft != YwdProtocol::FT_AGG_FB_CVEL)
+    if (ft != YwdProtocol::FT_FEEDBACK)
         logRawTx(frame, "RX");
 
     if (ft == YwdProtocol::FT_FEEDBACK) {
-        ++m_fbCount;
-        FeedbackFrame fb;
-        if (m_proto.decodeFeedback(frame, fb)) {
-            m_lastFeedback[fb.motor_id] = fb;
-            updateFeedbackTable(fb);
-            m_plotPanel_->pushFeedback(fb);
-            m_fbValid = true;
-        }
-    } else if (ft == YwdProtocol::FT_AGG_FB_MIT
-               || ft == YwdProtocol::FT_AGG_FB_POSVEL
-               || ft == YwdProtocol::FT_AGG_FB_CVEL) {
-        // Aggregate feedback (0x701/0x702/0x703, §5): one frame carries
-        // records for all controlled motors. Feed each into the same
-        // feedback table / plot pipeline as single-motor 0x600|node frames.
+        // V0.2 §7.1: every feedback frame uses the same "header + N records"
+        // layout, covering both single-node (N=1) and FB_AGG aggregate (N>1)
+        // feedback. Feed each record into the same table / plot pipeline.
         ++m_fbCount;
         std::vector<FeedbackFrame> vec;
-        if (m_proto.decodeAggFeedback(frame, vec)) {
+        if (m_proto.decodeFeedbackRecords(frame, vec)) {
+            uint8_t node = 0, seq = 0;
             for (const auto &fb : vec) {
                 m_lastFeedback[fb.motor_id] = fb;
                 updateFeedbackTable(fb);
                 m_plotPanel_->pushFeedback(fb);
                 m_fbValid = true;
+                node = fb.motor_id;
+                seq  = fb.seq;
             }
+            if (!vec.empty())
+                updateFeedbackTableSeqCell(node, seq);
         }
     } else if (ft == YwdProtocol::FT_PARAM_RESP) {
         // Distinguish by B1 (N): single-register response (N ≤ 1, from the
         // register tab) vs block response (N > 1, from batch read, §8.2).
         const uint8_t n = (frame.len >= 2) ? frame.data[1] : 0;
 
+        // Node-ID scan: a response to a REG_NODE_ID probe proves the CAN node
+        // exists. Record it and stop early once the target count is reached.
+        if (m_scanning && frame.len >= 7 && n >= 1 && frame.data[2] == REG_NODE_ID) {
+            const uint8_t found = frame.id & 0x7F;
+            if (!m_scanFound.contains(found)) {
+                m_scanFound.append(found);
+                logMessage(QString("[Scan] Node found: 0x%1 (%2/%3)")
+                               .arg(found, 2, 16, QChar('0'))
+                               .arg(m_scanFound.size())
+                               .arg(kScanTargetCount));
+                if (m_scanFound.size() >= kScanTargetCount) {
+                    logMessage(QString("[Scan] Done — %1 nodes found: %2")
+                                   .arg(m_scanFound.size())
+                                   .arg(formatNodeList(m_scanFound)));
+                    stopNodeScan();
+                    applyNodeMap();
+                }
+            }
+        }
+
+
         std::vector<ParamResponse> vec;
         if (m_proto.decodeRegBlockResponse(frame, vec)) {
             const uint8_t mid = frame.id & 0x7F;
-            for (auto &r : vec) {
+            for (const auto &r : vec) {
                 logMessage(
-                    QString("RegBlk <- Motor 0x%1 addr=0x%2 val=0x%3 %4")
+                    QString("RegBlk <- node 0x%1 addr=0x%2 val=0x%3 %4")
                         .arg(mid, 2, 16, QChar('0'))
                         .arg(r.addr, 2, 16, QChar('0'))
                         .arg(r.value, 8, 16, QChar('0'))
                         .arg(r.success ? "" : "FAIL"));
                 m_proto.applyRegScaling(r.addr, r.value);
-            
 
                 if (!r.is_write) {
-                    updateRegTableValue(frame.id & 0x7F, r.addr, r.rstat, r.value);
+                    updateRegTableValue(mid, r.addr, r.rstat, r.value);
                     m_lblRegResult->setText(
                         QString("0x%1 = %2")
                             .arg(r.addr, 2, 16, QChar('0'))
                             .arg(formatRegValue(r.addr, r.value)));
                     m_lblRegResult->setStyleSheet("color: green; font-family: monospace;");
                     m_editRegValue->setText(formatRegValue(r.addr, r.value));
-
-                    if (m_batchWaiting
-                        && mid == static_cast<uint8_t>(m_batchMotorIdx + 1)
-                        && static_cast<int>(vec.size()) == m_batchPendingN) {
-                        bool match = true;
-                        for (int i = 0; i < m_batchPendingN; ++i) {
-                            if (vec[i].addr != m_allRegs[m_batchBlockStart + i].addr) {
-                                match = false;
-                                break;
-                            }
-                        }
-                        if (match) {
-                            m_batchWaiting = false;
-                            m_batchRetries = 0;
-                            sendNextRegBlock();
-                        }
-                    }
                 } else {
                     m_lblRegResult->setText("Write OK");
                     m_lblRegResult->setStyleSheet("color: green; font-family: monospace;");
                 }
+            }
+
+            // Advance the batch exactly ONCE per response frame (not once per
+            // record). Compare against the *mapped* node ID (page → node), not
+            // the page number, since node IDs may differ from 1..4 after the
+            // connect-time scan. Doing this inside the record loop caused the
+            // batch to jump several blocks ahead per response, so most
+            // registers were never requested and the table stayed empty.
+            if (m_batchWaiting
+                && mid == nodeIdForIndex(m_batchMotorIdx)
+                && !vec.empty()) {
+                m_batchWaiting = false;
+                m_batchRetries = 0;
+                sendNextRegBlock();
             }
         }
     }
@@ -1447,12 +1701,12 @@ void MainWindow::updateFeedbackTable(const FeedbackFrame &fb)
         }
     };
 
+    // State codes per protocol V0.2 §7.2
     static const char *stateNames[] = {
-        "0:Init","1:Idle","2:Calib","3:Ready","4:Run","5:Stop",
-        "6:Error","7:Test","8:DFU","9:??" };
-    const char *sn = (fb.state < 10) ? stateNames[fb.state] : "?";
+        "0:Disabled","1:Enabled","2:Fault","3:Calibrating" };
+    const char *sn = (fb.state < 4) ? stateNames[fb.state] : "Reserved";
 
-    // Fault codes per protocol §7.3
+    // Fault codes per protocol V0.2 §7.3
     static const char *faultNames[] = {
         "No fault", "Overvoltage", "Undervoltage", "Overcurrent",
         "MOS overtemp", "Motor overtemp", "Comm lost (watchdog)",
@@ -1473,7 +1727,8 @@ void MainWindow::updateFeedbackTable(const FeedbackFrame &fb)
     setItem(7, QString::number(fb.voltage,  'f', 2));
     setItem(8, QString::number(fb.temp_mos)   + " °C");
     setItem(9, QString::number(fb.temp_motor) + " °C");
-    setItem(10, QString::number(fb.seq));
+    setItem(10, QString::number(fb.node_count));   // header N (records in frame)
+    setItem(11, QString::number(fb.seq));          // header SEQ (per feedback ID)
 
     for (int c = 0; c < m_feedbackTable->columnCount(); ++c) {
         auto *it = m_feedbackTable->item(row, c);
@@ -1486,14 +1741,86 @@ void MainWindow::updateFeedbackTable(const FeedbackFrame &fb)
 }
 
 // ============================================================================
+// Overwrite the SEQ cell of one motor's feedback row. In V0.2 SEQ lives in the
+// feedback frame header (per feedback CAN ID), so an aggregate frame carries a
+// single SEQ shared by all records; this keeps the newer value visible even
+// when the same record content was already cached.
+// ============================================================================
+void MainWindow::updateFeedbackTableSeqCell(uint8_t node, uint8_t seq)
+{
+    for (int r = 0; r < m_feedbackTable->rowCount(); ++r) {
+        auto *item = m_feedbackTable->item(r, 0);
+        if (item && item->text() ==
+                QString("0x%1").arg(node, 2, 16, QChar('0')).toUpper()) {
+            auto *si = m_feedbackTable->item(r, 11);
+            if (!si) {
+                si = new QTableWidgetItem();
+                m_feedbackTable->setItem(r, 11, si);
+            }
+            si->setText(QString::number(seq));
+            return;
+        }
+    }
+}
+
+// ============================================================================
+// Motor-page ↔ CAN node-ID mapping helpers
+// ============================================================================
+uint8_t MainWindow::nodeIdForIndex(int idx) const
+{
+    if (idx < 0 || idx >= kMaxMotors) return 0;
+    return m_nodeIds[idx];   // 0 == unknown (page not bound to a node)
+}
+
+int MainWindow::motorIndexForNode(uint8_t node) const
+{
+    if (node == 0) return -1;
+    for (int i = 0; i < kMaxMotors; ++i)
+        if (m_nodeValid[i] && m_nodeIds[i] == node) return i;
+    return -1;
+}
+
+// Enable/disable every control that belongs to one motor page. Pages whose
+// node ID could not be discovered stay disabled so the user cannot command or
+// read a non-existent node.
+void MainWindow::setMotorPageEnabled(int idx, bool en)
+{
+    if (idx < 0 || idx >= kMaxMotors) return;
+
+    // Control tabs: motor checkbox + its parameter edits.
+    m_mitEn[idx]->setEnabled(en);
+    for (QLineEdit *e : {m_mitPos[idx], m_mitVel[idx], m_mitKp[idx],
+                         m_mitKd[idx], m_mitTff[idx]})
+        e->setEnabled(en);
+    m_pvEn[idx]->setEnabled(en);
+    for (QLineEdit *e : {m_pvPos[idx], m_pvVelLim[idx], m_pvAcc[idx], m_pvDec[idx]})
+        e->setEnabled(en);
+    m_cvEn[idx]->setEnabled(en);
+    for (QLineEdit *e : {m_cvVel[idx], m_cvAcc[idx], m_cvDec[idx]})
+        e->setEnabled(en);
+
+    // System tab motor checkbox.
+    m_sysEn[idx]->setEnabled(en);
+
+    // Register page: table interactions and "Read All".
+    if (m_regTables[idx])      m_regTables[idx]->setEnabled(en);
+    if (m_btnReadAllMotor[idx]) m_btnReadAllMotor[idx]->setEnabled(en);
+    if (m_regMotorTabs)        m_regMotorTabs->setTabEnabled(idx, en);
+
+    // Kick the motor out of any active mode if it just became invalid.
+    if (!en && m_motorMode[idx] != MODE_NONE)
+        m_motorMode[idx] = MODE_NONE;
+}
+
+// ============================================================================
 // Register table per-motor value + RSTAT update
 // Each motor page table: Addr(0)|Name(1)|Value(2)|RSTAT(3)
 // ============================================================================
 void MainWindow::updateRegTableValue(uint8_t motor_id, uint8_t addr, uint8_t rstat, uint32_t value)
 {
-    // Cache for later refreshes
-    int mi = motor_id - 0x01;   // 0,1,2
-    if (mi < 0 || mi > 2) return;
+    // Cache for later refreshes — map the real CAN node ID back to its page.
+    int mi = motorIndexForNode(motor_id);
+    if (mi < 0) return;
     m_regValues[mi][addr] = value;
     m_regValid[mi][addr]  = true;
     m_regRstat[mi][addr]  = rstat;

@@ -85,6 +85,9 @@ public:
     // Clear all plotted points (keeps series/checkboxes)
     void clearPlotData();
 
+    // Enable/disable a motor's checkbox (e.g. a node with an unknown ID).
+    void setMotorAvailable(uint8_t motorId, bool available);
+
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 

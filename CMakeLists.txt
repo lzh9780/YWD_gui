@@ -28,6 +28,8 @@ set(SOURCES
     src/mainwindow.cpp
     src/canfd_device.cpp
     src/ywd_protocol.cpp
+    src/ota_client.cpp
+    src/ota_window.cpp
     src/YwdDiagramWidget.cpp
     src/YwdPlotPanel.cpp
 )
@@ -36,6 +38,8 @@ set(HEADERS
     include/mainwindow.h
     include/canfd_device.h
     include/ywd_protocol.h
+    include/ota_client.h
+    include/ota_window.h
     include/zcan.h
     include/YwdDiagramWidget.hpp
     include/YwdPlotPanel.hpp

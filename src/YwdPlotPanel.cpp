@@ -97,6 +97,11 @@ void YwdPlotPanel::onAddDiagram()
     m_splitter_->addWidget(diag);
     m_diagrams_.append(diag);
 
+    // Apply the current motor-availability mask to the new diagram.
+    for (auto it = m_motorAvailable_.constBegin();
+         it != m_motorAvailable_.constEnd(); ++it)
+        diag->setMotorAvailable(it.key(), it.value());
+
     connect(diag, &YwdDiagramWidget::requestClose,
             this, &YwdPlotPanel::onDiagramRequestClose);
 }
@@ -214,6 +219,16 @@ void YwdPlotPanel::clearHistory()
 
     for (auto *d : m_diagrams_)
         d->clearPlotData();
+}
+
+// ============================================================================
+// Enable/disable a motor (checkbox) across every diagram
+// ============================================================================
+void YwdPlotPanel::setMotorAvailable(uint8_t motorId, bool available)
+{
+    m_motorAvailable_[motorId] = available;   // remember for future diagrams
+    for (auto *d : m_diagrams_)
+        d->setMotorAvailable(motorId, available);
 }
 
 // ============================================================================

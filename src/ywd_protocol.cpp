@@ -2,15 +2,21 @@
 #include <cstring>
 
 // ---------------------------------------------------------------------------
-// CAN-FD DLC padding: only 0/8/12/16/20/24/32/48/64 are valid (per §2.1)
+// CAN-FD padding (V0.2 §2.1). V0.2 distinguishes the *DLC code* from the *data
+// field length*: legal data field lengths are 0..8, 12, 16, 20, 24, 32, 48, 64.
+// Per §2.1 the transmitter uses the smallest legal data length that can hold
+// the semantic payload. We model `len` as the data field length (bytes); the
+// driver maps it to a DLC code internally.
 // ---------------------------------------------------------------------------
-static constexpr uint8_t validDlcLut[] = {0, 8, 12, 16, 20, 24, 32, 48, 64};
+static constexpr uint8_t validLenLut[] = {0, 1, 2, 3, 4, 5, 6, 7, 8,
+                                          12, 16, 20, 24, 32, 48, 64};
 
-static uint8_t padToValidDlc(uint8_t len)
+// Smallest legal CAN-FD data field length that can hold `len` semantic bytes.
+static uint8_t padToValidLen(uint8_t len)
 {
-    for (uint8_t v : validDlcLut)
+    for (uint8_t v : validLenLut)
         if (len <= v) return v;
-    return len;
+    return 64;
 }
 
 YwdProtocol::YwdProtocol() {}
@@ -50,8 +56,8 @@ CanFdFrame YwdProtocol::encodeMitCtrl(uint8_t motor_id,
     f.id        = buildCmdId(CMD_MIT_CTRL, motor_id);
     f.is_ext_id = false;
     f.is_fd     = true;
-    f.brs       = false;
-    f.len       = padToValidDlc(12);
+    f.brs       = true;    // §2.1: BRS enabled (data phase at 5 Mbps)
+    f.len       = padToValidLen(12);
 
     memset(f.data, 0, sizeof(f.data));
 
@@ -100,7 +106,8 @@ CanFdFrame YwdProtocol::encodePosVel(uint8_t motor_id,
     f.id        = buildCmdId(CMD_POS_VEL_CTRL, motor_id);
     f.is_ext_id = false;
     f.is_fd     = true;
-    f.len       = padToValidDlc(12);
+    f.brs       = true;    // §2.1: BRS enabled (data phase at 5 Mbps)
+    f.len       = padToValidLen(12);
 
     memset(f.data, 0, sizeof(f.data));
 
@@ -127,7 +134,7 @@ CanFdFrame YwdProtocol::encodePosVel(uint8_t motor_id,
     return f;
 }
 
-// Constant velocity control frame (0x200)   §5.3   DLC=8
+// Constant velocity control frame (0x200)   §5.3   V0.2: 6-byte data field
 // B0-B1: V_des  int16 LE (round(vel / VMAX * 32767))
 // B2-B3: ACC    uint16 LE (LSB=1 rad/s², 0=use default)
 // B4-B5: DEC    uint16 LE (LSB=1 rad/s², 0=use default)
@@ -138,7 +145,8 @@ CanFdFrame YwdProtocol::encodeConstVel(uint8_t motor_id, float vel_des,
     f.id        = buildCmdId(CMD_CONST_VEL, motor_id);
     f.is_ext_id = false;
     f.is_fd     = true;
-    f.len       = padToValidDlc(8);
+    f.brs       = true;    // §2.1: BRS enabled (data phase at 5 Mbps)
+    f.len       = padToValidLen(6);   // V0.2 §5.3: 6-byte data field, no padding
 
     memset(f.data, 0, sizeof(f.data));
 
@@ -159,8 +167,8 @@ CanFdFrame YwdProtocol::encodeConstVel(uint8_t motor_id, float vel_des,
 }
 
 // ============================================================================
-// Aggregated multi-motor control frames (YWD_CANFD_聚合帧协议_V0.1.md §4)
-//   B0 = Header (bit0..2 = rec_cnt)  +  N × [NODE_ID(1B) + Body]
+// Aggregated multi-motor control frames (V0.2 §6)
+//   B0 = Header (bits[2:0] = rec_cnt)  +  N × [NODE_ID(1B) + Body]
 //   MIT Body (12B): p_des i32 | v_des i16 | kp u16(0.01) | kd u16(0.001) | tff i16
 //   PV  Body (10B): p_des i32 | vmax u16(vel/VMAX*65535) | acc u16(LSB=1) | dec u16(LSB=1)
 //   CV  Body (6B):  v_des i16 | acc u16(LSB=1) | dec u16(LSB=1)
@@ -171,7 +179,7 @@ CanFdFrame YwdProtocol::encodeAggMit(const std::vector<AggMitRecord> &recs)
     f.id        = 0x001;   // aggregate MIT control
     f.is_ext_id = false;
     f.is_fd     = true;
-    f.brs       = false;
+    f.brs       = true;    // §2.1: BRS enabled (data phase at 5 Mbps)
 
     memset(f.data, 0, sizeof(f.data));
 
@@ -205,7 +213,7 @@ CanFdFrame YwdProtocol::encodeAggMit(const std::vector<AggMitRecord> &recs)
         f.data[off++] =  tff      & 0xFF;
         f.data[off++] = (tff >> 8) & 0xFF;
     }
-    f.len = padToValidDlc(static_cast<uint8_t>(off));
+    f.len = padToValidLen(static_cast<uint8_t>(off));
     return f;
 }
 
@@ -215,7 +223,7 @@ CanFdFrame YwdProtocol::encodeAggPosVel(const std::vector<AggPosVelRecord> &recs
     f.id        = 0x002;   // aggregate Pos-Vel control
     f.is_ext_id = false;
     f.is_fd     = true;
-    f.brs       = false;
+    f.brs       = true;    // §2.1: BRS enabled (data phase at 5 Mbps)
 
     memset(f.data, 0, sizeof(f.data));
 
@@ -244,7 +252,7 @@ CanFdFrame YwdProtocol::encodeAggPosVel(const std::vector<AggPosVelRecord> &recs
         f.data[off++] =  dec      & 0xFF;
         f.data[off++] = (dec >> 8) & 0xFF;
     }
-    f.len = padToValidDlc(static_cast<uint8_t>(off));
+    f.len = padToValidLen(static_cast<uint8_t>(off));
     return f;
 }
 
@@ -254,7 +262,7 @@ CanFdFrame YwdProtocol::encodeAggConstVel(const std::vector<AggConstVelRecord> &
     f.id        = 0x003;   // aggregate Const-Vel control
     f.is_ext_id = false;
     f.is_fd     = true;
-    f.brs       = false;
+    f.brs       = true;    // §2.1: BRS enabled (data phase at 5 Mbps)
 
     memset(f.data, 0, sizeof(f.data));
 
@@ -277,11 +285,11 @@ CanFdFrame YwdProtocol::encodeAggConstVel(const std::vector<AggConstVelRecord> &
         f.data[off++] =  dec      & 0xFF;
         f.data[off++] = (dec >> 8) & 0xFF;
     }
-    f.len = padToValidDlc(static_cast<uint8_t>(off));
+    f.len = padToValidLen(static_cast<uint8_t>(off));
     return f;
 }
 
-// System command frame (0x400)   §10  DLC=1, B0=sub-command only
+// System command frame (0x400)   §10  data field = 1 byte (DLC code 1), B0=sub-command
 CanFdFrame YwdProtocol::encodeSystemCmd(uint8_t motor_id,
                                         uint8_t cmd, uint8_t /*param*/)
 {
@@ -289,7 +297,8 @@ CanFdFrame YwdProtocol::encodeSystemCmd(uint8_t motor_id,
     f.id      = buildCmdId(CMD_SYSTEM, motor_id);
     f.is_ext_id = false;
     f.is_fd   = true;
-    f.len     = padToValidDlc(1);   // 1 → 8  (spec §10: DLC=1, only B0)
+    f.brs     = true;    // §2.1: BRS enabled (data phase at 5 Mbps)
+    f.len     = padToValidLen(1);   // §10: 1-byte data field, only B0
 
     memset(f.data, 0, sizeof(f.data));
     f.data[0] = cmd;
@@ -306,7 +315,8 @@ CanFdFrame YwdProtocol::encodeRegWrite(uint8_t motor_id,
     f.id        = buildCmdId(CMD_REG_OP, motor_id);
     f.is_ext_id = false;
     f.is_fd     = true;
-    f.len       = padToValidDlc(7);   // 7 → 8
+    f.brs       = true;    // §2.1: BRS enabled (data phase at 5 Mbps)
+    f.len       = padToValidLen(7);   // E = 2 + 5 = 7 (legal length, no padding)
 
     memset(f.data, 0, sizeof(f.data));
     f.data[0] = 0x02;                    // CMD write
@@ -329,7 +339,8 @@ CanFdFrame YwdProtocol::encodeRegRead(uint8_t motor_id, uint16_t addr)
     f.id        = buildCmdId(CMD_REG_OP, motor_id);
     f.is_ext_id = false;
     f.is_fd     = true;
-    f.len       = padToValidDlc(3);   // 3 → 8
+    f.brs       = true;    // §2.1: BRS enabled (data phase at 5 Mbps)
+    f.len       = padToValidLen(3);   // E = 2 + 1 = 3 (legal length, no padding)
 
     memset(f.data, 0, sizeof(f.data));
     f.data[0] = 0x01;             // CMD read
@@ -343,122 +354,97 @@ CanFdFrame YwdProtocol::encodeRegRead(uint8_t motor_id, uint16_t addr)
 // Decoding functions
 // ============================================================================
 
-bool YwdProtocol::decodeFeedback(const CanFdFrame &frame, FeedbackFrame &fb)
+// V0.2 §7.1 feedback decode — unified for single-node and aggregate frames.
+// Layout: 3-byte header (B0=N, B1=SEQ, B2=VBUS uint8 0.25V), then N records of
+// 13 bytes: +0 NODE_ID | +1 STATE/MODE | +2 FAULT | +3..+6 POS int32 |
+// +7..+8 VEL int16 | +9..+10 TORQUE int16 | +11 T_MOS | +12 T_ROTOR.
+// The data field length must be the smallest legal length that holds E=3+13N;
+// padding must be 0x00. Malformed frames (reserved bits set, N out of 1..4,
+// wrong length, non-zero padding, duplicate/out-of-range NODE_ID) are dropped.
+bool YwdProtocol::decodeFeedbackRecords(const CanFdFrame &frame,
+                                        std::vector<FeedbackFrame> &out)
 {
-    // Must be 0x600..0x67F, NOT 0x680..0x6FF (param resp)
-    if ((frame.id & 0xFF80) != FRAME_FEEDBACK) return false;
-
-    // DLC is fixed to 16 per §7.1; short frames would read stale data
-    if (frame.len < 16) return false;
-
-    const uint8_t *d = frame.data;
-    fb.motor_id = frame.id & 0x7F;   // 7-bit NODE_ID per §2.2
-
-    // B0: STATE[7:4] | MODE[3:0]
-    fb.state = (d[0] >> 4) & 0x0F;
-    fb.mode  = d[0] & 0x0F;
-
-    // B1: FAULT
-    fb.fault = d[1];
-
-    // B2-B5: POS  int32  LE  normalized position
-    int32_t pos_raw = d[2] | (d[3] << 8) | (d[4] << 16) | (d[5] << 24);
-    fb.position = (float)pos_raw / 2147483647.0f * m_pmax;   // raw→rad
-    // actual  x = pos_raw / (2³¹-1) * PMAX
-
-    // B6-B7: VEL  int16  LE  normalized velocity
-    int16_t vel_raw = (int16_t)(d[6] | (d[7] << 8));
-    fb.velocity = (float)vel_raw / 32767.0f * m_vmax;         // raw→rad/s
-
-    // B8-B9: TORQUE  int16  LE  normalized torque
-    int16_t trq_raw = (int16_t)(d[8] | (d[9] << 8));
-    fb.torque = (float)trq_raw / 32767.0f * m_tmax;          // raw→N·m
-
-    // B10: T_MOS  int8  ℃
-    fb.temp_mos = (int8_t)d[10];
-
-    // B11: T_ROTOR  int8  ℃
-    fb.temp_motor = (int8_t)d[11];
-
-    // B12-B13: VBUS  int16  LE  LSB=0.01V
-    int16_t vbus_raw = (int16_t)(d[12] | (d[13] << 8));
-    fb.voltage = (float)vbus_raw * 0.01f;
-
-    // B14: SEQ
-    fb.seq = d[14];
-
-    // B15: Reserved
-
-    return true;
-}
-
-// Aggregate feedback decode (§5.2). A single frame carries N motor records:
-//   B0 = Header (bit0..2 = rec_cnt)
-//   then N × [ NODE_ID(1B) + YwdFeedback_t(16B) ]
-//   (+ optional trailing 6B CRC stats in newer firmware)
-// The 16B record body uses the exact same field layout as the 0x600|node
-// feedback body (offsets below are record-relative, i.e. single-frame +1).
-bool YwdProtocol::decodeAggFeedback(const CanFdFrame &frame,
-                                    std::vector<FeedbackFrame> &out)
-{
-    switch (frame.id) {
-        case FRAME_AGG_FB_MIT:
-        case FRAME_AGG_FB_POSVEL:
-        case FRAME_AGG_FB_CVEL:
-            break;
-        default:
-            return false;
-    }
-    if (frame.len < 1) return false;
-
-    const uint8_t *d = frame.data;
-    const int n = d[0] & 0x07;                    // rec_cnt (bit0..2), 1..4
-    if (n < 1 || n > 4) return false;
-
-    // 1 + N*17 bytes of records; newer firmware appends 6B CRC stats
-    if (frame.len < 1 + n * 17) return false;
-
     out.clear();
-    out.reserve(static_cast<size_t>(n));
+
+    // Only 0x600..0x67F is feedback; 0x680..0x6FF is the parameter response.
+    if ((frame.id & 0xFF80) != FRAME_FEEDBACK) return false;
+    if (frame.len < 3) return false;
+
+    const uint8_t *d = frame.data;
+
+    // ---- Header ----
+    const uint8_t b0 = d[0];
+    if (b0 & 0xF8) return false;                 // reserved bits[7:3] must be 0
+    const int n = b0 & 0x07;                     // record count N
+    if (n < 1 || n > 4) return false;            // §11: at most 4 nodes/driver
+
+    const uint8_t seq   = d[1];
+    const uint8_t vbus  = d[2];                  // uint8, 0.25 V/LSB
+    const float   voltage = static_cast<float>(vbus) * 0.25f;
+
+    // ---- Length & padding validation ----
+    const int semanticLen = 3 + 13 * n;          // E
+    const uint8_t expectLen = padToValidLen(static_cast<uint8_t>(semanticLen));
+    if (frame.len != expectLen) return false;
+    for (int i = semanticLen; i < expectLen; ++i)
+        if (d[i] != 0x00) return false;          // padding must be zero
+
+    const uint8_t canNode = frame.id & 0x7F;     // node from the CAN ID
+
+    // ---- Records ----
+    std::vector<FeedbackFrame> recs;
+    recs.reserve(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) {
-        const int off = 1 + i * 17;
+        const int off = 3 + i * 13;
         FeedbackFrame fb{};
-        fb.motor_id = d[off + 0];                 // NODE_ID inside the record
+        fb.motor_id  = d[off + 0];               // NODE_ID (1..127)
+        fb.state     = (d[off + 1] >> 4) & 0x0F;
+        fb.mode      =  d[off + 1]       & 0x0F;
+        fb.fault     =  d[off + 2];
 
-        // +1: STATE[7:4] | MODE[3:0]
-        fb.state = (d[off + 1] >> 4) & 0x0F;
-        fb.mode  = d[off + 1] & 0x0F;
+        int32_t pos_raw = (int32_t)(static_cast<uint32_t>(d[off + 3])
+                        | (static_cast<uint32_t>(d[off + 4]) << 8)
+                        | (static_cast<uint32_t>(d[off + 5]) << 16)
+                        | (static_cast<uint32_t>(d[off + 6]) << 24));
+        // INT32_MIN is a reserved value → saturate to -PMAX (§4.2.1)
+        fb.position = (pos_raw == INT32_MIN)
+                          ? -m_pmax
+                          : (float)pos_raw / 2147483647.0f * m_pmax;
 
-        // +2: FAULT
-        fb.fault = d[off + 2];
+        int16_t vel_raw = (int16_t)(d[off + 7] | (d[off + 8] << 8));
+        fb.velocity = (vel_raw == INT16_MIN)
+                          ? -m_vmax
+                          : (float)vel_raw / 32767.0f * m_vmax;
 
-        // +3..+6: POS int32 LE
-        int32_t pos_raw = d[off+3] | (d[off+4] << 8) | (d[off+5] << 16) | (d[off+6] << 24);
-        fb.position = (float)pos_raw / 2147483647.0f * m_pmax;
+        int16_t trq_raw = (int16_t)(d[off + 9] | (d[off + 10] << 8));
+        fb.torque = (trq_raw == INT16_MIN)
+                        ? -m_tmax
+                        : (float)trq_raw / 32767.0f * m_tmax;
 
-        // +7..+8: VEL int16 LE
-        int16_t vel_raw = (int16_t)(d[off+7] | (d[off+8] << 8));
-        fb.velocity = (float)vel_raw / 32767.0f * m_vmax;
+        fb.temp_mos   = (int8_t)d[off + 11];
+        fb.temp_motor = (int8_t)d[off + 12];
 
-        // +9..+10: TORQUE int16 LE
-        int16_t trq_raw = (int16_t)(d[off+9] | (d[off+10] << 8));
-        fb.torque = (float)trq_raw / 32767.0f * m_tmax;
+        // Header-shared fields
+        fb.voltage    = voltage;
+        fb.seq        = seq;
+        fb.node_count = static_cast<uint8_t>(n);
 
-        // +11: T_MOS int8 ℃
-        fb.temp_mos = (int8_t)d[off+11];
-
-        // +12: T_ROTOR int8 ℃
-        fb.temp_motor = (int8_t)d[off+12];
-
-        // +13..+14: VBUS int16 LE, LSB=0.01V
-        int16_t vbus_raw = (int16_t)(d[off+13] | (d[off+14] << 8));
-        fb.voltage = (float)vbus_raw * 0.01f;
-
-        // +15: SEQ
-        fb.seq = d[off+15];
-
-        out.push_back(fb);
+        if (fb.motor_id < 1 || fb.motor_id > 127) return false;   // out of range
+        recs.push_back(fb);
     }
+
+    // NODE_ID uniqueness within the frame (§7.1)
+    for (size_t i = 0; i < recs.size(); ++i)
+        for (size_t j = i + 1; j < recs.size(); ++j)
+            if (recs[i].motor_id == recs[j].motor_id) return false;
+
+    // NODE_ID vs CAN ID node field (§7.1)
+    uint8_t minNode = 0xFF;
+    for (const auto &r : recs)
+        minNode = std::min(minNode, r.motor_id);
+    if (minNode != canNode) return false;
+
+    out = std::move(recs);
     return true;
 }
 
@@ -488,24 +474,28 @@ bool YwdProtocol::decodeParamResponse(const CanFdFrame &frame,
 
 YwdProtocol::FrameType YwdProtocol::classifyFrame(uint32_t canId)
 {
-    // Aggregation control frames use very low IDs (0x001~0x003) — match the
+    // Aggregation control frames use very low IDs (0x001~0x006) — match the
     // full ID here. (Previously they sat in the switch on (canId & 0xFF00),
     // which is always 0 for these IDs, so they could never match.)
     switch (canId) {
-        case FRAME_AGG_CTRL1:    return FT_AGG_CTRL1;
-        case FRAME_AGG_CTRL2:    return FT_AGG_CTRL2;
-        case FRAME_AGG_CTRL3:    return FT_AGG_CTRL3;
-        case FRAME_AGG_FB_MIT:   return FT_AGG_FB_MIT;
-        case FRAME_AGG_FB_POSVEL: return FT_AGG_FB_POSVEL;
-        case FRAME_AGG_FB_CVEL:  return FT_AGG_FB_CVEL;
-        default:                 break;
+        case FRAME_AGG_CTRL1:      return FT_AGG_CTRL1;
+        case FRAME_AGG_CTRL2:      return FT_AGG_CTRL2;
+        case FRAME_AGG_CTRL3:      return FT_AGG_CTRL3;
+        case FRAME_AGG_CTRL_VENDOR4: return FT_AGG_CTRL_VENDOR4;
+        case FRAME_AGG_CTRL_VENDOR5: return FT_AGG_CTRL_VENDOR5;
+        case FRAME_AGG_CTRL_VENDOR6: return FT_AGG_CTRL_VENDOR6;
+        default:                   break;
     }
 
-    // 0x600~0x7FF range: feedback & param response share same high byte,
-    // so use 0xFF80 mask (NODE_ID is 7-bit per §2.2, bit7 is free)
+    // 0x600~0x7FF range: use the 0xF80 page bits — NODE_ID is 7-bit (§2.2),
+    // so bit 7 of the low byte selects the sub-channel within the page.
     uint32_t hi = canId & 0xFF00;
     if (hi == 0x600) {
         return (canId & 0x0080) ? FT_PARAM_RESP : FT_FEEDBACK;
+    }
+    if (hi == 0x700) {
+        // 0x780|node = Vendor OTA D→H (V0.2 §12); 0x700..0x77F is reserved
+        return (canId & 0x0080) ? FT_VENDOR_OTA : FT_UNKNOWN;
     }
 
     switch (hi) {
@@ -514,6 +504,7 @@ YwdProtocol::FrameType YwdProtocol::classifyFrame(uint32_t canId)
         case CMD_CONST_VEL:      return FT_CONST_VEL;
         case CMD_SYSTEM:         return FT_SYSTEM_CMD;
         case CMD_REG_OP:         return FT_REG_OP;
+        case CMD_VENDOR_OTA:     return FT_VENDOR_OTA;   // 0x500 | node (§12)
         default:                 return FT_UNKNOWN;
     }
 }
@@ -528,9 +519,10 @@ CanFdFrame YwdProtocol::encodeRegBlockRead(uint8_t motor_id,
     f.id        = buildCmdId(CMD_REG_OP, motor_id);
     f.is_ext_id = false;
     f.is_fd     = true;
+    f.brs       = true;    // §2.1: BRS enabled (data phase at 5 Mbps)
 
     int n = std::min((int)rids.size(), 8);
-    f.len = padToValidDlc(static_cast<uint8_t>(2 + n));   // CMD(1) + N(1) + N × RID(1)
+    f.len = padToValidLen(static_cast<uint8_t>(2 + n));   // CMD(1) + N(1) + N × RID(1)
     memset(f.data, 0, sizeof(f.data));
     f.data[0] = 0x01;  // read
     f.data[1] = static_cast<uint8_t>(n);
@@ -583,7 +575,7 @@ QVector<RegInfo> YwdProtocol::getAllRegisters()
         // Bank 0x00 – Identity / Communication
         {0x00, "NODE_ID",       0x00, false, "uint32"},
         {0x01, "CMD_TIMEOUT",   0x00, false, "uint32"},
-        {0x02, "FB_DIV",        0x00, false, "uint32"},
+        {0x02, "FB_AGG",        0x00, false, "uint32"},   // V0.2: was FB_DIV
         // Bank 0x10 – Control config & soft limits
         {0x10, "CTRL_MODE",     0x10, false, "uint32"},
         {0x11, "PMAX",          0x10, false, "float32"},
@@ -634,7 +626,8 @@ QVector<RegInfo> YwdProtocol::getAllRegisters()
         {0x52, "VB",            0x50, true,  "float32"},
         {0x53, "T_PCB",         0x50, true,  "float32"},
         {0x54, "T_MOTOR",       0x50, true,  "float32"},
-        {0x55, "IQ",            0x50, true,  "float32"},
+        {0x55, "IQ",            0x50, true,  "float32"},   // peak q-axis current
+        {0x56, "ID",            0x50, true,  "float32"},   // V0.2: peak d-axis current
         // Bank 0x60 – Version info  (read-only)
         {0x60, "PROTOCOL_VER",  0x60, true,  "uint32"},
         {0x61, "VENDOR_ID",     0x60, true,  "uint32"},

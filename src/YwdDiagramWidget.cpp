@@ -91,7 +91,7 @@ void YwdDiagramWidget::buildUi()
 
     topRow->addStretch();
 
-    for (uint8_t mId = 1; mId <= 3; mId ++)
+    for (uint8_t mId = 1; mId <= 4; mId ++)
     {
         m_motors_[mId].motorId = mId;
         m_motors_[mId].checkBox = new QCheckBox(
@@ -192,6 +192,21 @@ void YwdDiagramWidget::clearPlotData()
             it->series->clear();
     }
     m_emptyLabel_->setVisible(m_knownMotors_.isEmpty());
+}
+
+// ============================================================================
+// Enable/disable a motor's checkbox. Used to grey out motors whose node ID
+// could not be discovered (no node bound to that page).
+// ============================================================================
+void YwdDiagramWidget::setMotorAvailable(uint8_t motorId, bool available)
+{
+    auto it = m_motors_.find(motorId);
+    if (it == m_motors_.end() || !it->checkBox)
+        return;
+    it->checkBox->setEnabled(available);
+    if (!available && it->checkBox->isChecked()) {
+        it->checkBox->setChecked(false);   // stop drawing the unknown motor
+    }
 }
 
 // ============================================================================

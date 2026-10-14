@@ -21,16 +21,19 @@
 #define FRAME_FEEDBACK          0x600   // Motor feedback
 #define FRAME_PARAM_RESP        0x680   // Register read response
 
-// Aggregation control frames
-#define FRAME_AGG_CTRL1         0x001
-#define FRAME_AGG_CTRL2         0x002
-#define FRAME_AGG_CTRL3         0x003
+// Aggregation control frames (H→D, §3.1 / §6)
+#define FRAME_AGG_CTRL1         0x001   // MIT
+#define FRAME_AGG_CTRL2         0x002   // Pos+Vel
+#define FRAME_AGG_CTRL3         0x003   // ConstVel
 
-// Aggregation feedback frames (D → H, §5.4):
-// one frame carries N motor records, NODE_ID is inside each record
-#define FRAME_AGG_FB_MIT        0x701
-#define FRAME_AGG_FB_POSVEL     0x702
-#define FRAME_AGG_FB_CVEL       0x703
+// Vendor aggregate control frames (H→D, §1.5 / §3.1): vendor CTRL_MODE 4..6
+#define FRAME_AGG_CTRL_VENDOR4  0x004
+#define FRAME_AGG_CTRL_VENDOR5  0x005
+#define FRAME_AGG_CTRL_VENDOR6  0x006
+
+// Vendor OTA channels (§12) — not used by this GUI's control path
+#define CMD_VENDOR_OTA          0x500   // H→D  OTA (0x500 | node; 0x500 = broadcast)
+#define FRAME_VENDOR_OTA_RESP   0x780   // D→H  OTA response
 
 // ============================================================================
 // System command codes (CMD_SYSTEM frame, data[0])
@@ -59,7 +62,7 @@
 // Key register addresses (matching getAllRegisters catalogue)
 #define REG_NODE_ID             0x00  // Node ID
 #define REG_CMD_TIMEOUT         0x01  // Command timeout
-#define REG_FB_DIV              0x02  // Feedback divider
+#define REG_FB_AGG              0x02  // Feedback grouping (V0.2: was FB_DIV)
 #define REG_CTRL_MODE           0x10  // Control mode
 #define REG_PMAX                0x11  // Position limit (rad)
 #define REG_VMAX                0x12  // Velocity limit (rad/s)
@@ -74,7 +77,8 @@
 #define REG_VB                  0x52  // Bus voltage
 #define REG_T_PCB               0x53  // PCB temperature
 #define REG_T_MOTOR             0x54  // Motor temperature
-#define REG_IQ                  0x55  // Q-axis current
+#define REG_IQ                  0x55  // Q-axis current (peak)
+#define REG_ID                  0x56  // D-axis current (peak) — V0.2 new
 #define REG_PROTOCOL_VER        0x60  // Protocol version
 #define REG_VENDOR_ID           0x61  // Vendor ID
 #define REG_PRODUCT_ID          0x62  // Product ID
@@ -84,40 +88,21 @@
 // ============================================================================
 // Structs for decoded data
 // ============================================================================
-struct MitCtrlCmd {
-    float pos_des;      // Desired position (rad)    data[0..3] int16
-    float vel_des;      // Desired velocity (rad/s)  data[4..5] int12
-    float kp;           // Position stiffness (Nm/rad) data[6..7] uint12
-    float kd;           // Velocity damping (Nm/(rad/s)) data[8..9] uint12
-    float ff_torque;    // Feedforward torque (Nm)   data[10..11] int12
-};
-
-struct PosVelCmd {
-    float pos_des;      // Desired position (rad)    data[0..3] 16+16
-    float vel_limit;    // Velocity limit (rad/s)     data[4..7]
-};
-
-struct ConstVelCmd {
-    float vel_des;      // Desired velocity (rad/s)  data[0..3] int32
-};
-
-struct SystemCmd {
-    uint8_t cmd;        // Command code
-    uint8_t param;      // Parameter
-};
-
+// One 13-byte feedback record (V0.2 §7.1). Values are converted from the
+// record-relative offsets to physical units using the cached PMAX/VMAX/TMAX.
 struct FeedbackFrame {
-    uint8_t  motor_id;
-    uint8_t  state;       // B0[7:4]  state code
-    uint8_t  mode;        // B0[3:0]  control mode
-    uint8_t  fault;       // B1       fault code
-    float    position;    // rad,     normalized (raw / (2³¹-1) * PMAX)
-    float    velocity;    // rad/s,   normalized (raw / 32767 * VMAX)
-    float    torque;      // N·m,    normalized (raw / 32767 * TMAX)
-    float    voltage;     // V,       VBUS int16 LSB=0.01V
-    int8_t   temp_mos;     // ℃
-    int8_t   temp_motor;   // ℃
-    uint8_t  seq;          // frame counter 0~255
+    uint8_t  motor_id;     // +0  NODE_ID of this record
+    uint8_t  state;        // +1[7:4]  state code (0=Dis,1=En,2=Fault,3=Calib)
+    uint8_t  mode;         // +1[3:0]  control mode (1..3 std, 4..6 vendor)
+    uint8_t  fault;        // +2       fault code (§7.3)
+    float    position;     // +3..+6   int32 normalized → rad
+    float    velocity;     // +7..+8   int16 normalized → rad/s
+    float    torque;       // +9..+10  int16 normalized → N·m (output shaft)
+    int8_t   temp_mos;     // +11      int8 °C (MOSFET)
+    int8_t   temp_motor;   // +12      int8 °C (rotor/winding)
+    float    voltage;      // header B2 uint8, 0.25 V/LSB (shared, low-precision)
+    uint8_t  seq;          // header B1, per-feedback-CAN-ID counter (shared)
+    uint8_t  node_count;   // header B0 record count N (1..4)
 };
 
 struct ParamResponse {
@@ -162,7 +147,7 @@ public:
 
     // -- Encoding (command -> CAN-FD frame) --
 
-    // MIT control (motor_id: 0xFF = broadcast)
+    // MIT control (NODE_ID 0x01..0x7F; 0x00 is the broadcast address, §2.2)
     CanFdFrame encodeMitCtrl(uint8_t motor_id,
                              float pos_des, float vel_des,
                              float kp, float kd, float ff_torque);
@@ -176,12 +161,12 @@ public:
     CanFdFrame encodeConstVel(uint8_t motor_id, float vel_des,
                               float acc = 0.0f, float dec = 0.0f);
 
-    // -- Aggregated multi-motor control frames (YWD_CANFD_聚合帧协议_V0.1.md §4) --
+    // -- Aggregated multi-motor control frames (V0.2 §6) --
     // One frame carries up to 4 motors:
-    //   B0 = Header (bit0..2 = rec_cnt)  +  N × [NODE_ID(1B) + Body]
+    //   B0 = Header (bits[2:0] = rec_cnt)  +  N × [NODE_ID(1B) + Body]
     //   MIT ID=0x001 (Body 12B), PosVel ID=0x002 (Body 10B), ConstVel ID=0x003 (Body 6B)
     struct AggMitRecord {
-        uint8_t motor_id;    // node id carried inside the frame (0x01..0x03)
+        uint8_t motor_id;    // node id carried inside the frame (0x01..0x7F)
         float   pos_des;     // rad
         float   vel_des;     // rad/s
         float   kp;          // N·m/rad   (0.01/LSB)
@@ -224,16 +209,15 @@ public:
     // -- Decoding (CAN-FD frame -> structured data) --
     // (uses stored pmax/vmax/tmax to convert raw→physical units)
 
-    bool decodeFeedback(const CanFdFrame &frame, FeedbackFrame &fb);
     bool decodeParamResponse(const CanFdFrame &frame, ParamResponse &resp);
 
-    // Decode an aggregate feedback frame (0x701/0x702/0x703, §5.2):
-    //   B0 = Header (bit0..2 = rec_cnt N)
-    //   then N × [ NODE_ID(1B) + YwdFeedback_t(16B) ]
-    //   (+ optional trailing 6B CRC stats, tolerated)
-    // Returns one FeedbackFrame per record; `out` is cleared on entry.
-    bool decodeAggFeedback(const CanFdFrame &frame,
-                           std::vector<FeedbackFrame> &out);
+    // Decode a feedback frame (V0.2 §7.1): every feedback frame — single-node or
+    // aggregate — uses the same "3-byte header + N × 13-byte record" layout.
+    // Performs the §7.1 format validation and returns one FeedbackFrame per
+    // record (each already carrying the shared SEQ/VBUS from the header);
+    // `out` is cleared on entry. Returns false if the frame is malformed.
+    bool decodeFeedbackRecords(const CanFdFrame &frame,
+                               std::vector<FeedbackFrame> &out);
 
     // Decode a block register response (C: B0=CMD, B1=N, then RID+RSTAT+val)
     bool decodeRegBlockResponse(const CanFdFrame &frame,
@@ -249,47 +233,16 @@ public:
         FT_REG_OP,
         FT_FEEDBACK,
         FT_PARAM_RESP,
+        FT_VENDOR_OTA,
         FT_AGG_CTRL1,
         FT_AGG_CTRL2,
         FT_AGG_CTRL3,
-        FT_AGG_FB_MIT,
-        FT_AGG_FB_POSVEL,
-        FT_AGG_FB_CVEL
+        FT_AGG_CTRL_VENDOR4,
+        FT_AGG_CTRL_VENDOR5,
+        FT_AGG_CTRL_VENDOR6
     };
 
     static FrameType classifyFrame(uint32_t canId);
-
-    // Scaling helpers
-    static float int16ToFloat(uint16_t val, float scale) {
-        int16_t sval = static_cast<int16_t>(val);
-        return static_cast<float>(sval) * scale;
-    }
-
-    static float uint12ToFloat(uint16_t val, float maxVal) {
-        return static_cast<float>(val & 0x0FFF) * maxVal / 4095.0f;
-    }
-
-    static float int12ToFloat(uint16_t val, float maxVal) {
-        int16_t sval = static_cast<int16_t>(val << 4) >> 4;  // sign extend
-        return static_cast<float>(sval) * maxVal / 2047.0f;
-    }
-
-    static uint16_t floatToInt16(float val, float scale) {
-        int16_t sval = static_cast<int16_t>(std::round(val / scale));
-        return static_cast<uint16_t>(sval);
-    }
-
-    static uint16_t floatToUint12(float val, float maxVal) {
-        uint16_t u = static_cast<uint16_t>(
-            std::round(std::max(0.0f, std::min(val, maxVal)) / maxVal * 4095.0f));
-        return u & 0x0FFF;
-    }
-
-    static uint16_t floatToInt12(float val, float maxVal) {
-        int16_t s = static_cast<int16_t>(
-            std::round(std::max(-maxVal, std::min(val, maxVal)) / maxVal * 2047.0f));
-        return static_cast<uint16_t>(s) & 0x0FFF;
-    }
 
     // Register name mapping
     static QString getRegisterName(uint16_t addr);
@@ -299,10 +252,11 @@ public:
     static QVector<RegInfo> getAllRegisters();
 
 private:
-    // Build the base CAN ID: (0x000 | bank<<8 | motor_id)
-    // For CMD frames: ID = base_cmd + motor_id (low 8 bits)
+    // Build the CAN ID: base_cmd | NODE_ID. NODE_ID is a 7-bit address
+    // (0x01..0x7F, 0x00 = broadcast, §2.2) — bit 7 must never leak into the
+    // ID (e.g. 0x480|0x80 would alias the 0x500 OTA channel).
     uint32_t buildCmdId(uint16_t baseCmd, uint8_t motor_id) const {
-        return baseCmd | (motor_id & 0xFF);
+        return baseCmd | (motor_id & 0x7F);
     }
 
     // Scaling limits – defaults from typical motor datasheet,

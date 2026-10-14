@@ -38,6 +38,9 @@ public:
     // Clear all history
     void clearHistory();
 
+    // Enable/disable a motor (checkbox) across every diagram.
+    void setMotorAvailable(uint8_t motorId, bool available);
+
 public slots:
     void onTimerTick();
 
@@ -58,6 +61,7 @@ private:
     QToolButton *m_clearBtn_   = nullptr;
     QSplitter   *m_splitter_   = nullptr;
     QVector<YwdDiagramWidget *> m_diagrams_;
+    QMap<uint8_t, bool> m_motorAvailable_;   // motor availability mask (node → on)
 
     // ── Timer ─────────────────────────────────────────────────
     QTimer *m_timer_ = nullptr;
