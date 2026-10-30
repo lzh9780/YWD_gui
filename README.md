@@ -90,11 +90,6 @@ Run:
 sudo ./build/YWD_Motor_Control        # USB access to the adapter usually needs root
 ```
 
-> The project references the protocol specification
-> `YWD电机驱动协议_V0.2.md` (with `YWD电机驱动协议_V0.2与V0.1差异说明.md`
-> describing the V0.1→V0.2 changes) and the OTA document `OTA升级协议v2.md` —
-> keep them next to the executable if you want the exact wire-format details.
-
 ---
 
 ## 3. Quick Start
@@ -109,6 +104,7 @@ sudo ./build/YWD_Motor_Control        # USB access to the adapter usually needs 
    `Connected`, the log shows `Device opened successfully.` and the status
    bar shows `RX: 0 | Feedback: 0.0 Hz`. Connection automatically starts the
    **node-ID scan** (§4.1), which fills the motor-to-node mapping.
+   ![connect](./images/connect.png)
 4. **Read the motor parameters.** Open the register page `Motor 1` and press
    **Read All** (§8.2). This loads `PMAX`/`VMAX`/`TMAX` so the control scaling
    of the mode tabs is correct.
@@ -570,8 +566,7 @@ aggregate frames, all of them are plotted.
 
 ## 10. Firmware Upgrade (OTA)
 
-Press the **OTA** button in the top bar to open the firmware-upgrade window
-(implemented per `OTA升级协议v2.md`). The window shows device info (status,
+Press the **OTA** button in the top bar to open the firmware-upgrade window. The window shows device info (status,
 board ID, hardware/software/boot versions, compile date) and firmware info
 (size, `board_code`, CRC16), and drives a
 **HEARTBEAT → START → ERASE → PROG → CHECK → JUMP** state machine:
@@ -641,8 +636,8 @@ checked (uncheck it to hide raw dumps and keep only status messages):
 | Register response | `0x700 + node` | D→H | Param response with RSTAT |
 | OTA downlink (ext) | `0x04000000 + node` | H→D | OTA boot commands |
 | OTA uplink (ext) | `0x08000000 + node` | D→H | OTA heartbeat / status |
-| OTA trigger | `0x500 | node` | H→D | APP→Boot jump trigger |
-| OTA response | `0x780 | node` | D→H | OTA response (reserved) |
+| OTA trigger | `0x500 \| node` | H→D | APP→Boot jump trigger |
+| OTA response | `0x780 \| node` | D→H | OTA response (reserved) |
 
 **Key scaling factors** (identical in single and aggregate encodings):
 
